@@ -124,16 +124,11 @@ class ContinuousCorrector:
         new_lon: float,
         uncertainty_m: float,
     ) -> None:
-        from backend.storage.map_store import upsert_feature, get_all_features
+        from backend.storage.map_store import upsert_feature, get_feature_by_id
         from backend.analysis.kalman_tracker import PositionKalman
 
         try:
-            fc = get_all_features(limit=5000)
-            existing = next(
-                (f for f in fc.get("features", [])
-                 if f.get("properties", {}).get("id") == feature_id),
-                None,
-            )
+            existing = get_feature_by_id(feature_id)
         except Exception:
             existing = None
 

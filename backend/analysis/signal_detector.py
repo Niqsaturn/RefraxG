@@ -271,7 +271,7 @@ def _python_local_detections(
             estimated_lon=est_lon,
             azimuth_deg=round(avg_bearing, 1) if avg_bearing is not None else None,
             beamwidth_deg=None,
-            notes=f"rule-based: {len(band_samples)} obs, snr={avg_snr:.1f}dB, σ_bearing={bearing_sigma:.1f}°{range_notes}{spectral_notes}",
+            notes=f"rule-based: {len(band_samples)} obs, snr={avg_snr:.1f}dB, rssi={avg_rssi:.1f}dBm, freq={freq_mhz:.3f}MHz, σ_bearing={bearing_sigma:.1f}°{range_notes}{spectral_notes}",
         ))
 
     ms = (time.monotonic() - t0) * 1000

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import yaml
@@ -8,6 +9,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, request
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,6 +82,7 @@ from backend.storage.map_store import (
     upsert_feature,
     features_in_bounds,
     get_all_features,
+    get_feature_by_id,
     get_coverage_grid,
     get_coverage_progress,
     log_analysis,
@@ -540,9 +544,20 @@ def _run_analysis_cycle(cfg: dict) -> None:
         loop_manager.set_cycle_metrics(metrics)
         return
 
-    # Operator position from most recent telemetry with GPS
-    op_lat = next((s["lat"] for s in reversed(samples) if s.get("lat")), 0.0)
-    op_lon = next((s["lon"] for s in reversed(samples) if s.get("lon")), 0.0)
+    # Operator position: from telemetry GPS, then SDR node centroid, then (0,0)
+    op_lat = next((s["lat"] for s in reversed(samples) if s.get("lat")), None)
+    op_lon = next((s["lon"] for s in reversed(samples) if s.get("lon")), None)
+    if op_lat is None or op_lon is None:
+        try:
+            from backend.sdr.kiwisdr_client import node_pool as _np
+            nodes = [n for n in _np.list_nodes() if n.get("lat") and n.get("lon")]
+            if nodes:
+                op_lat = sum(n["lat"] for n in nodes) / len(nodes)
+                op_lon = sum(n["lon"] for n in nodes) / len(nodes)
+        except Exception:
+            pass
+    op_lat = op_lat or 0.0
+    op_lon = op_lon or 0.0
 
     # ------------------------------------------------------------------
     # Waterfall analysis: enrich samples that carry PSD bins
@@ -628,6 +643,8 @@ def _run_analysis_cycle(cfg: dict) -> None:
     result = detect_signals(
         samples, model_config, fcc_context, examples_text, op_lat, op_lon
     )
+    if result.error:
+        logger.warning("detect_signals error (provider=%s): %s", model_config["provider"], result.error)
     metrics["cycle_phase"] = "detected"
     corrected_detections, correction_audit, correction_stats = _apply_ai_correction_loop(result.detections, samples)
     metrics["candidates"] = len(result.detections)
@@ -1898,6 +1915,20 @@ async def _capture_loop() -> None:
         corrector.start()
     except Exception:
         pass
+    # Auto-start analysis loop: prefer Ollama if reachable, else python_local
+    try:
+        ollama_models = discover_ollama_models()
+        if ollama_models:
+            provider, model = "ollama", ollama_models[0]
+        else:
+            py_models = discover_python_local_models()
+            provider = "python_local"
+            model = py_models[0] if py_models else "baseline-v1"
+        loop_manager.update_config(interval_seconds=60, provider=provider, model=model)
+        loop_manager.start()
+        logger.info("analysis loop auto-started: provider=%s model=%s", provider, model)
+    except Exception as exc:
+        logger.warning("analysis loop auto-start failed: %s", exc)
 
 
 async def node_pool_auto_populate_loop() -> None:

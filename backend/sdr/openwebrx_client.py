@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 # Known public OpenWebRX nodes (host, port, description)
 _PUBLIC_NODES: list[tuple[str, int, str]] = [
     ("websdr.ewi.utwente.nl", 8901, "UTwente 0-29MHz HF"),
-    ("kiwisdr.local", 8073, "Local KiwiSDR"),
+    ("openwebrx.dk", 8073, "OZ5AGJ Denmark VHF"),
+    ("sdr.k3fef.com", 8073, "K3FEF Pennsylvania HF/VHF"),
 ]
 
 _CONNECT_TIMEOUT_S = 8.0
@@ -54,6 +55,7 @@ class OpenWebRXPool:
         self._lock = threading.Lock()
         self._nodes: list[OpenWebRXNode] = []
         self._initialized = False
+        self._default_nodes()
 
     def _default_nodes(self) -> None:
         for host, port, desc in _PUBLIC_NODES:

@@ -429,10 +429,10 @@ class KiwiNodePool:
                     n_bins=_KIWI_BINS,
                 )
                 provenance = "synthetic"
+            node_id = f"{node['host']}:{node.get('port', 8073)}"
             try:
                 from backend.foxhunt.auto_loop import event_bus
-                node_key = f"{node['host']}:{node['port']}"
-                frame_seq = self._next_frame_seq(node_key)
+                frame_seq = self._next_frame_seq(node_id)
                 event_bus.publish({
                     "type": "sdr_frame",
                     "source": {
@@ -440,13 +440,16 @@ class KiwiNodePool:
                         "host": node["host"],
                         "port": node["port"],
                     },
+                    "node": node_id,
                     "source_provenance": provenance,
                     "frame_schema_version": 1,
                     "frame_seq": frame_seq,
                     "center_freq_hz": _KIWI_PASSBAND_HZ / 2,
+                    "bw_hz": _KIWI_PASSBAND_HZ,
                     "span_hz": _KIWI_PASSBAND_HZ,
                     "sample_rate_hz": _KIWI_PASSBAND_HZ,
                     "fft_bins": avg_bins,
+                    "bins_db": avg_bins,
                     "fft_bin_count": len(avg_bins),
                     "calibration_offsets": {
                         "freq_offset_hz": 0.0,
@@ -455,6 +458,17 @@ class KiwiNodePool:
                     },
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+            except Exception:
+                pass
+            # Feed HF bins into spectrum mosaic (live or synthetic)
+            try:
+                from backend.sdr.spectrum_mosaic import spectrum_mosaic
+                spectrum_mosaic.ingest_kiwisdr_frame(
+                    node_id=node_id,
+                    center_freq_hz=_KIWI_PASSBAND_HZ / 2,
+                    bandwidth_hz=float(_KIWI_PASSBAND_HZ),
+                    bins_db=avg_bins,
+                )
             except Exception:
                 pass
             peaks = client.scan_peaks(min_snr_db)

@@ -326,14 +326,20 @@ class AutoFoxHuntLoop:
                 elif state == "ACQUIRING":
                     self._do_acquire()
                 elif state == "COLLECTING":
-                    # Try automated bearing first; fallback to timed wait for manual input
+                    # Automated bearing — no manual input required
                     self._do_auto_bearing()
-                    time.sleep(self.scan_interval_s)
                     with self._lock:
                         target = self._state.target
+                    # Solve immediately if we have enough observations
                     if target and target.observation_count >= self.min_obs_to_solve:
                         self._try_solve()
-                    elif target is None:
+                    elif target and len(target.rssi_obs) >= 2:
+                        # Enough RSSI to attempt multilateration even without bearing
+                        self._try_solve()
+                    else:
+                        # Wait for next RSSI sweep and retry
+                        time.sleep(self.scan_interval_s)
+                    if target is None:
                         with self._lock:
                             self._state.state = "SCANNING"
                 elif state == "SOLVING":
@@ -494,6 +500,59 @@ class AutoFoxHuntLoop:
             ))
             added += 1
         return added
+
+    def _do_auto_bearing(self) -> None:
+        """Automated bearing from multi-node RSSI gradient — no manual input required.
+
+        Observer position is the RSSI-weighted centroid of GPS-equipped nodes,
+        so this works even when op_lat/op_lon have not been set.
+        """
+        with self._lock:
+            target = self._state.target
+            rssi_obs = list(target.rssi_obs) if target else []
+        if not target or not rssi_obs:
+            return
+
+        gps_nodes = [o for o in rssi_obs if o.lat and o.lon]
+        if not gps_nodes:
+            return
+
+        # Observer position = RSSI-power-weighted centroid of GPS nodes
+        powers = [10 ** (o.rssi_dbm / 10.0) for o in gps_nodes]
+        total_p = sum(powers) or 1.0
+        obs_lat = sum(powers[i] * gps_nodes[i].lat for i in range(len(gps_nodes))) / total_p
+        obs_lon = sum(powers[i] * gps_nodes[i].lon for i in range(len(gps_nodes))) / total_p
+
+        try:
+            from backend.analysis.auto_bearing import compute_auto_bearing
+            node_obs = [
+                {"lat": o.lat, "lon": o.lon, "rssi_dbm": o.rssi_dbm}
+                for o in gps_nodes
+            ]
+            result = compute_auto_bearing(node_obs, target.freq_hz)
+            if result.confidence < 0.1:
+                return
+            snr_equiv = max(1.0, (1.0 - result.sigma_deg / 90.0) * 20.0)
+            obs = BearingObs(
+                lat=obs_lat, lon=obs_lon,
+                bearing_deg=result.bearing_deg,
+                snr_db=snr_equiv,
+                freq_hz=target.freq_hz,
+            )
+            with self._lock:
+                target.bearing_obs.append(obs)
+            _emit("bearing_added", {
+                "lat": obs_lat, "lon": obs_lon,
+                "bearing_deg": result.bearing_deg,
+                "snr_db": snr_equiv,
+                "freq_hz": target.freq_hz,
+                "total_bearings": len(target.bearing_obs),
+                "auto": True,
+                "method": result.method,
+                "confidence": result.confidence,
+            })
+        except Exception as exc:
+            logger.debug("auto_bearing: %s", exc)
 
     def _try_solve(self) -> None:
         """Run the multilateration solver on current observations."""

@@ -327,13 +327,13 @@ async function refreshSpeculative() {
 
     _safeSetSourceData('speculative', {
       type: 'FeatureCollection',
-      features: spectToggle.checked ? (data.features || []) : [],
+      features: spectToggle?.checked ? (data.features || []) : [],
     }, 'speculative');
-    _safeSetSourceData('spec-rays', { type: 'FeatureCollection', features: rayToggle.checked ? rays : [] }, 'speculative');
-    _safeSetSourceData('spec-sectors', { type: 'FeatureCollection', features: sectorToggle.checked ? sectors : [] }, 'speculative');
-    _safeSetSourceData('spec-ellipses', { type: 'FeatureCollection', features: confidenceToggle.checked ? ellipses : [] }, 'speculative');
-    _safeSetSourceData('spec-range-bands', { type: 'FeatureCollection', features: rangeBandToggle.checked ? rangeBands : [] }, 'speculative');
-    _safeSetSourceData('spec-uncertainty-polygons', { type: 'FeatureCollection', features: confidenceToggle.checked ? uncertaintyPolygons : [] }, 'speculative');
+    _safeSetSourceData('spec-rays', { type: 'FeatureCollection', features: rayToggle?.checked ? rays : [] }, 'speculative');
+    _safeSetSourceData('spec-sectors', { type: 'FeatureCollection', features: sectorToggle?.checked ? sectors : [] }, 'speculative');
+    _safeSetSourceData('spec-ellipses', { type: 'FeatureCollection', features: confidenceToggle?.checked ? ellipses : [] }, 'speculative');
+    _safeSetSourceData('spec-range-bands', { type: 'FeatureCollection', features: rangeBandToggle?.checked ? rangeBands : [] }, 'speculative');
+    _safeSetSourceData('spec-uncertainty-polygons', { type: 'FeatureCollection', features: confidenceToggle?.checked ? uncertaintyPolygons : [] }, 'speculative');
   } catch (err) {
     health.render.speculative = `error: ${err.message}`;
   } finally { _renderHealth(); }
@@ -341,7 +341,7 @@ async function refreshSpeculative() {
 
 // ── Coverage layer ─────────────────────────────────────────────────────────
 async function refreshCoverage() {
-  if (!sourcesInitialized || !coverageToggle.checked) return;
+  if (!sourcesInitialized || !coverageToggle?.checked) return;
   try {
     const data = await fetch('/api/map/coverage').then((r) => r.json());
     map.getSource('coverage').setData(data);
@@ -355,7 +355,7 @@ async function refreshCoverage() {
 
 // ── Satellite layer ────────────────────────────────────────────────────────
 async function refreshSatellites() {
-  if (!sourcesInitialized || !satelliteToggle.checked) return;
+  if (!sourcesInitialized || !satelliteToggle?.checked) return;
   try {
     const group = satGroupSelect?.value || 'geo';
     const data = await fetch(`/api/satellites/positions?group=${group}&limit=40`).then((r) => r.json());
@@ -730,11 +730,7 @@ const foxTargetMeta  = document.getElementById('foxTargetMeta');
 const foxObsCount    = document.getElementById('foxObsCount');
 const foxStart       = document.getElementById('foxStart');
 const foxStop        = document.getElementById('foxStop');
-const foxLatEl       = document.getElementById('foxLat');
-const foxLonEl       = document.getElementById('foxLon');
-const addBearingBtn  = document.getElementById('addBearing');
-const bearingDegEl   = document.getElementById('bearingDeg');
-const bearingSnrEl   = document.getElementById('bearingSnr');
+const geoStatus      = document.getElementById('geoStatus');
 const confirmedList  = document.getElementById('confirmedList');
 const nodeList       = document.getElementById('nodeList');
 const rediscoverBtn       = document.getElementById('rediscoverNodes');
@@ -835,7 +831,7 @@ function _renderMosaicFrame(segments) {
   if (!segments || !segments.length) return;
   const hf = segments.find((s) => s.center_freq_hz < 50e6);
   const vhf = segments.find((s) => s.center_freq_hz >= 50e6);
-  if (hf && hf.bins_db && hf.bins_db.length >= WF_BINS) {
+  if (hf && hf.bins_db && hf.bins_db.length >= 64) {
     _pushWaterfallRow(hf.bins_db);
   }
   if (vhf && vhf.bins_db && vhf.bins_db.length >= 64) {
@@ -894,20 +890,23 @@ function _dbToRgba(db) {
 }
 
 function _pushWaterfallRow(bins) {
-  if (!_wfCtx || !_wfImageData || bins.length < _wfBins) return;
-  // Scroll existing rows up by 1 (shift pixel data up by WF_BINS*4 bytes)
+  if (!_wfCtx || !_wfImageData) return;
   const data = _wfImageData.data;
   data.copyWithin(0, _wfBins * 4);
-  // Write new row at bottom
   const baseIdx = (WF_ROWS - 1) * _wfBins * 4;
+  const srcBins = bins.length >= _wfBins ? bins : _resampleBins(bins, _wfBins);
   for (let i = 0; i < _wfBins; i++) {
-    const [r, g, b] = _dbToRgba(bins[i]);
+    const [r, g, b] = _dbToRgba(srcBins[i]);
     const idx = baseIdx + i * 4;
     data[idx] = r; data[idx + 1] = g; data[idx + 2] = b; data[idx + 3] = 255;
   }
   _wfCtx.putImageData(_wfImageData, 0, 0);
   _wfRowCount++;
 }
+
+// ── Local GeoJSON stores (replaces src._data private access) ─────────────
+let _foxTargetsData = { type: 'FeatureCollection', features: [] };
+let _emFieldsData   = { type: 'FeatureCollection', features: [] };
 
 // ── Map sources & layers for fox hunt ────────────────────────────────────
 let _foxSourcesAdded = false;
@@ -1087,18 +1086,14 @@ function _handleSseEvent(ev) {
     }
 
     case 'target_pinned': {
-      // Render confirmed target on map
       const src = map.getSource('fox-targets');
       if (src && ev.feature) {
-        const existing = src._data?.features || [];
         ev.feature.properties.freq_label = `${(ev.freq_hz / 1e6).toFixed(2)} MHz`;
-        existing.push(ev.feature);
-        health.counts.fox_targets = existing.length;
-        _safeSetSourceData('fox-targets', { type: 'FeatureCollection', features: existing }, 'fox_targets');
+        _foxTargetsData.features.push(ev.feature);
+        health.counts.fox_targets = _foxTargetsData.features.length;
+        _safeSetSourceData('fox-targets', _foxTargetsData, 'fox_targets');
       }
-      // Add to confirmed list panel
       _addConfirmedItem(ev);
-      // Clear bearing rays for next target
       _bearingObs.length = 0;
       _updateBearingRaySource();
       _renderHealth();
@@ -1117,11 +1112,6 @@ function _handleSseEvent(ev) {
         _setWaterfallStatus('mismatch', 'Decode/config mismatch: missing waterfall bins');
         break;
       }
-      if (!Number.isFinite(centerHz) || !Number.isFinite(bwHz) || bwHz <= 0) {
-        _wfDecodeMismatchCount += 1;
-        _setWaterfallStatus('mismatch', 'Decode/config mismatch: invalid center frequency/sample rate');
-        break;
-      }
       if (_wfBins !== bins.length) {
         _wfBins = bins.length;
         _initWaterfall();
@@ -1133,9 +1123,11 @@ function _handleSseEvent(ev) {
         }
         _wfLastSeqByNode.set(nodeKey, frameSeq);
       }
-      _wfCenterFreqHz = centerHz;
-      _wfBandwidthHz = bwHz;
-      _renderWaterfallFreqAxis();
+      if (Number.isFinite(centerHz) && Number.isFinite(bwHz) && bwHz > 0) {
+        _wfCenterFreqHz = centerHz;
+        _wfBandwidthHz = bwHz;
+        _renderWaterfallFreqAxis();
+      }
       _pushWaterfallRow(bins);
       _wfLastFrameAt = Date.now();
       _setWaterfallStatus(
@@ -1155,31 +1147,26 @@ function _handleSseEvent(ev) {
     case 'em_field_updated': {
       const src = map.getSource('em-fields');
       if (src && ev.geometry) {
-        const existing = src._data?.features || [];
         const newFeat = {
           type: 'Feature',
           geometry: ev.geometry,
           properties: { feature_id: ev.feature_id },
         };
-        const idx = existing.findIndex((f) => f.properties?.feature_id === ev.feature_id);
-        if (idx >= 0) existing[idx] = newFeat;
-        else existing.push(newFeat);
-        src.setData({ type: 'FeatureCollection', features: existing });
+        const idx = _emFieldsData.features.findIndex((f) => f.properties?.feature_id === ev.feature_id);
+        if (idx >= 0) _emFieldsData.features[idx] = newFeat;
+        else _emFieldsData.features.push(newFeat);
+        src.setData(_emFieldsData);
       }
       break;
     }
 
     case 'feature_corrected': {
-      // Flash the corrected feature briefly
       const src = map.getSource('fox-targets');
       if (src && ev.lat && ev.lon) {
-        const data = src._data;
-        if (data) {
-          const f = data.features?.find((ft) => ft.properties?.id === ev.feature_id);
-          if (f) {
-            f.geometry.coordinates = [ev.lon, ev.lat];
-            src.setData(data);
-          }
+        const f = _foxTargetsData.features.find((ft) => ft.properties?.id === ev.feature_id);
+        if (f) {
+          f.geometry.coordinates = [ev.lon, ev.lat];
+          src.setData(_foxTargetsData);
         }
       }
       break;
@@ -1250,8 +1237,13 @@ function _renderPeakList(peaks) {
 }
 
 window._tuneToFreq = function(freqHz) {
-  if (bearingDegEl) bearingDegEl.dataset.freq = freqHz;
   // Pan map to nearest confirmed feature at that frequency if one exists
+  const feat = _foxTargetsData.features.find(
+    (f) => Math.abs((f.properties.freq_hz || 0) - freqHz) < 50_000
+  );
+  if (feat?.geometry?.coordinates) {
+    map.flyTo({ center: feat.geometry.coordinates, zoom: 13 });
+  }
 };
 
 // ── Node list renderer ────────────────────────────────────────────────────
@@ -1272,52 +1264,77 @@ async function _refreshNodeList() {
 }
 
 // ── Fox hunt button handlers ──────────────────────────────────────────────
-foxStart?.addEventListener('click', async () => {
-  const lat = parseFloat(foxLatEl?.value || '0');
-  const lon = parseFloat(foxLonEl?.value || '0');
-  await fetch('/api/foxhunt/auto/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lat, lon }),
-  }).catch(() => {});
-  _setFoxState('SCANNING');
-  if (foxTargetBox) foxTargetBox.style.display = 'block';
-});
+function _startFoxHuntAuto() {
+  const _doStart = async (lat, lon) => {
+    await fetch('/api/foxhunt/auto/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lat, lon }),
+    }).catch(() => {});
+    _setFoxState('SCANNING');
+    if (foxTargetBox) foxTargetBox.style.display = 'block';
+  };
+
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        if (geoStatus) geoStatus.textContent = `Position: ${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+        _doStart(lat, lon);
+      },
+      () => {
+        if (geoStatus) geoStatus.textContent = 'Position: using SDR node centroid';
+        _doStart(0, 0);
+      },
+      { timeout: 5000 }
+    );
+  } else {
+    if (geoStatus) geoStatus.textContent = 'Position: using SDR node centroid';
+    _doStart(0, 0);
+  }
+}
+
+foxStart?.addEventListener('click', _startFoxHuntAuto);
 
 foxStop?.addEventListener('click', async () => {
   await fetch('/api/foxhunt/auto/stop', { method: 'POST' }).catch(() => {});
   _setFoxState('IDLE');
 });
 
-addBearingBtn?.addEventListener('click', async () => {
-  const bearing = parseFloat(bearingDegEl?.value);
-  const snr = parseFloat(bearingSnrEl?.value || '10');
-  if (isNaN(bearing)) return;
-  const lat = parseFloat(foxLatEl?.value || '0');
-  const lon = parseFloat(foxLonEl?.value || '0');
-  await fetch('/api/foxhunt/auto/observe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bearing_deg: bearing, snr_db: snr, lat, lon, source: 'manual' }),
-  }).catch(() => {});
+autoHuntToggle?.addEventListener('click', () => {
+  if (!_autoHuntEnabled) {
+    const _doAutoHunt = async (lat, lon) => {
+      await fetch('/api/foxhunt/autonomous/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat, lon }),
+      }).catch(() => {});
+      _autoHuntEnabled = true;
+      if (autoHuntToggle) autoHuntToggle.textContent = 'Auto Hunt: ON';
+    };
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (geoStatus) geoStatus.textContent = `Position: ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
+          _doAutoHunt(pos.coords.latitude, pos.coords.longitude);
+        },
+        () => {
+          if (geoStatus) geoStatus.textContent = 'Position: using SDR node centroid';
+          _doAutoHunt(0, 0);
+        },
+        { timeout: 5000 }
+      );
+    } else {
+      _doAutoHunt(0, 0);
+    }
+  } else {
+    fetch('/api/foxhunt/autonomous/stop', { method: 'POST' }).catch(() => {});
+    _autoHuntEnabled = false;
+    if (autoHuntToggle) autoHuntToggle.textContent = 'Auto Hunt: OFF';
+  }
 });
 
-autoHuntToggle?.addEventListener('click', async () => {
-  const lat = parseFloat(foxLatEl?.value || '0');
-  const lon = parseFloat(foxLonEl?.value || '0');
-  if (!_autoHuntEnabled) {
-    await fetch('/api/foxhunt/autonomous/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lat, lon }),
-    }).catch(() => {});
-    _autoHuntEnabled = true;
-  } else {
-    await fetch('/api/foxhunt/autonomous/stop', { method: 'POST' }).catch(() => {});
-    _autoHuntEnabled = false;
-  }
-  autoHuntToggle.textContent = `Auto Hunt: ${_autoHuntEnabled ? 'ON' : 'OFF'}`;
-});
 
 rediscoverBtn?.addEventListener('click', async () => {
   if (rediscoverBtn) rediscoverBtn.textContent = '↺ Discovering…';
