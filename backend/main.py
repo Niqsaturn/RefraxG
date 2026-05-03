@@ -8,7 +8,6 @@ import yaml
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib import error, request
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +195,7 @@ class AIAnalyzeRequest(BaseModel):
 
 
 class AnalysisRunRequest(BaseModel):
-    provider: str = "ollama"
+    provider: str = "python_local"
     model: str = ""
     lat: float | None = None
     lon: float | None = None
@@ -817,23 +816,6 @@ def _write_training_status(status: dict) -> None:
     TRAINING_STATUS_FILE.write_text(json.dumps(status, indent=2), encoding="utf-8")
 
 
-def discover_ollama_models() -> list[str]:
-    req = request.Request("http://127.0.0.1:11434/api/tags", method="GET")
-    try:
-        with request.urlopen(req, timeout=2.0) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (TimeoutError, error.URLError, json.JSONDecodeError):
-        return []
-    models = payload.get("models", [])
-    return sorted(
-        {
-            item.get("name")
-            for item in models
-            if isinstance(item, dict) and isinstance(item.get("name"), str) and item.get("name")
-        }
-    )
-
-
 def discover_python_local_models() -> list[str]:
     from backend.model_providers.python_local import discover_models_detailed
     return [m["name"] for m in discover_models_detailed()]
@@ -841,40 +823,21 @@ def discover_python_local_models() -> list[str]:
 
 def discover_available_models() -> dict[str, Any]:
     from backend.model_providers.python_local import discover_models_detailed
-    ollama = discover_ollama_models()
     py_models = discover_models_detailed()
     return {
-        "ollama": ollama,
         "python_local": [m["name"] for m in py_models],
         "python_local_detailed": py_models,
     }
 
 
 def run_inference(provider: str, model: str, payload: dict) -> dict:
-    if provider == "ollama":
-        body = json.dumps({"model": model, **payload}).encode("utf-8")
-        req = request.Request(
-            "http://127.0.0.1:11434/api/generate",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with request.urlopen(req, timeout=30.0) as resp:
-            return json.loads(resp.read().decode("utf-8"))
     if provider == "python_local":
-        # GGUF model via llama-cpp-python
-        if model.endswith(".gguf") or _is_gguf_model(model):
-            from backend.model_providers.python_local import infer_with_gguf, discover_models_detailed
-            model_path = _resolve_model_path(model, "llama_cpp", discover_models_detailed())
+        from backend.model_providers.python_local import discover_models_detailed, run_llm_inference
+        models = discover_models_detailed()
+        entry = next((m for m in models if m["name"] == model), None)
+        if entry and entry.get("adapter") != "triangulation":
             prompt = payload.get("prompt", "")
-            text = infer_with_gguf(model_path, prompt)
-            return {"provider": provider, "model": model, "response": text}
-        # HuggingFace transformers model
-        if _is_hf_model(model):
-            from backend.model_providers.python_local import infer_with_transformers, discover_models_detailed
-            model_path = _resolve_model_path(model, "transformers", discover_models_detailed())
-            prompt = payload.get("prompt", "")
-            text = infer_with_transformers(model_path or model, prompt)
+            text = run_llm_inference(entry, prompt)
             return {"provider": provider, "model": model, "response": text}
         # Triangulation baseline WLS
         samples_raw = payload.get("samples", [])
@@ -894,29 +857,6 @@ def run_inference(provider: str, model: str, payload: dict) -> dict:
                 return {"provider": provider, "model": model, "error": str(exc)}
         return {"provider": provider, "model": model, "output": "no samples provided"}
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
-
-
-def _is_gguf_model(name: str) -> bool:
-    from backend.model_providers.python_local import discover_models_detailed
-    for m in discover_models_detailed():
-        if m["name"] == name and m.get("backend") == "llama_cpp":
-            return True
-    return False
-
-
-def _is_hf_model(name: str) -> bool:
-    from backend.model_providers.python_local import discover_models_detailed
-    for m in discover_models_detailed():
-        if m["name"] == name and m.get("backend") == "transformers":
-            return True
-    return False
-
-
-def _resolve_model_path(name: str, backend: str, models: list[dict]) -> str:
-    for m in models:
-        if m["name"] == name and m.get("backend") == backend:
-            return m.get("path", name)
-    return name
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -977,15 +917,23 @@ def loop_status() -> dict:
 # ── Features ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/features")
-def get_features(kind: str | None = Query(default=None, pattern="^(infrastructure|estimate)?$"), timestamp_lte: str | None = None) -> dict:
-    data = load_geojson()
-    features = data.get("features", [])
+def get_features(kind: str | None = Query(default=None, pattern="^(infrastructure|estimate|speculative|confirmed)?$"), timestamp_lte: str | None = None) -> dict:
+    data = get_all_features(limit=5000)
+    db_features = data.get("features", [])
+    # Merge static GeoJSON features that haven't been migrated to SQLite yet.
+    # Uses feature ID deduplication so nothing appears twice post-migration.
+    db_ids = {f.get("properties", {}).get("id") for f in db_features}
+    geojson_extras = [
+        f for f in load_geojson().get("features", [])
+        if f.get("properties", {}).get("id") not in db_ids
+    ]
+    features = db_features + geojson_extras
 
     if kind:
         features = [f for f in features if f.get("properties", {}).get("kind") == kind]
     if timestamp_lte:
         cutoff = _parse_timestamp(timestamp_lte)
-        if cutoff is not None:  # skip filter for invalid/undefined values
+        if cutoff is not None:
             features = [
                 f for f in features
                 if (ts := _parse_timestamp(f["properties"].get("timestamp", ""))) and ts <= cutoff
@@ -1876,11 +1824,9 @@ def rf_bearing_from_phase(
 
 @app.post("/api/ai/analyze")
 def ai_analyze(body: AIAnalyzeRequest) -> dict:
-    """Send spectrum / RF data to an Ollama model for AI-driven analysis.
+    """Send spectrum / RF data to a locally installed Python LLM for analysis."""
+    from backend.model_providers.python_local import discover_models_detailed, run_llm_inference
 
-    The model receives a structured prompt combining the user's context with
-    a JSON representation of the spectrum_data payload.
-    """
     system_prompt = (
         "You are an expert RF signal analyst. Analyze the provided spectrum data "
         "and identify: signal types, likely emitter sources, bearing estimates, "
@@ -1893,24 +1839,15 @@ def ai_analyze(body: AIAnalyzeRequest) -> dict:
     if body.context:
         user_content = f"Context: {body.context}\n\n{user_content}"
 
-    ollama_body = json.dumps({
-        "model": body.model,
-        "system": system_prompt,
-        "prompt": user_content,
-        "stream": False,
-    }).encode("utf-8")
-    req = request.Request(
-        "http://127.0.0.1:11434/api/generate",
-        data=ollama_body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    models = discover_models_detailed()
+    entry = next((m for m in models if m["name"] == body.model), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model '{body.model}' not found in installed Python packages")
     try:
-        with request.urlopen(req, timeout=60.0) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        return {"model": body.model, "analysis": result.get("response", ""), "done": result.get("done", False)}
+        analysis = run_llm_inference(entry, user_content, system_prompt=system_prompt)
+        return {"model": body.model, "analysis": analysis, "done": True}
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"LLM inference failed: {exc}") from exc
 
 
 # ── SSE event stream ──────────────────────────────────────────────────────────
@@ -1961,15 +1898,11 @@ async def _capture_loop() -> None:
         corrector.start()
     except Exception:
         pass
-    # Auto-start analysis loop: prefer Ollama if reachable, else python_local
+    # Auto-start analysis loop using any locally installed Python LLM (or triangulation baseline)
     try:
-        ollama_models = discover_ollama_models()
-        if ollama_models:
-            provider, model = "ollama", ollama_models[0]
-        else:
-            py_models = discover_python_local_models()
-            provider = "python_local"
-            model = py_models[0] if py_models else "baseline-v1"
+        py_models = discover_python_local_models()
+        provider = "python_local"
+        model = py_models[0] if py_models else "triangulation-baseline"
         loop_manager.update_config(interval_seconds=60, provider=provider, model=model)
         loop_manager.start()
         logger.info("analysis loop auto-started: provider=%s model=%s", provider, model)
@@ -1978,8 +1911,28 @@ async def _capture_loop() -> None:
     # Auto-seed public transmitter data (FCC + towers) for major population centres
     try:
         _asyncio.create_task(_auto_seed_public_emitters())
+        _asyncio.create_task(_migrate_geojson_to_map_store())
     except Exception:
         pass
+
+
+async def _migrate_geojson_to_map_store() -> None:
+    """One-time sync of existing static GeoJSON features into SQLite map_store.
+
+    Runs at startup so FCC/tower auto-seed and fox hunt confirmed features all
+    appear together through /api/features (which now reads from SQLite only).
+    """
+    from backend.storage.map_store import get_feature_by_id
+    await _asyncio.sleep(2)
+    data = load_geojson()
+    migrated = 0
+    for f in data.get("features", []):
+        fid = f.get("properties", {}).get("id") or f.get("id", "")
+        if fid and get_feature_by_id(fid) is None:
+            upsert_feature(f)
+            migrated += 1
+    if migrated:
+        logger.info("migrated %d static GeoJSON features into map_store", migrated)
 
 
 async def _auto_seed_public_emitters() -> None:

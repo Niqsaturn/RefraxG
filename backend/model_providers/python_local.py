@@ -1,13 +1,16 @@
-"""Python-native model discovery and inference.
+"""Python-native LLM detection and inference.
 
-Searches common local paths for GGUF, ONNX, HuggingFace, and sklearn models.
-Supports llama-cpp-python, transformers, and the project's own triangulation
-baseline JSON models as inference backends.
+Scans the current Python environment for installed LLM packages using
+importlib.metadata, then dispatches inference through the appropriate adapter.
+No Ollama or external daemon required.
 """
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,79 +18,108 @@ _log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_FILE = ROOT / "backend" / "model_providers" / "python_local_models.json"
-MODEL_DIR = ROOT / "backend" / "models"
 TRIANGULATION_DIR = ROOT / "models"
 
-_GGUF_SEARCH_PATHS = [
-    Path.home() / "models",
-    Path.home() / ".local" / "share" / "models",
-    Path.home() / ".local" / "share" / "nomic.ai" / "GPT4All",
-    Path("/opt/models"),
-    Path("/models"),
-    ROOT / "models",
-    ROOT / "backend" / "models",
+# ---------------------------------------------------------------------------
+# Known LLM packages: pattern → (importable_module, display_name, adapter_key)
+# ---------------------------------------------------------------------------
+_KNOWN_PACKAGES: list[tuple[re.Pattern, str, str, str]] = [
+    # (pkg name pattern,  module to import,  display label,  adapter key)
+    (re.compile(r"^llama[_-]cpp[_-]python$", re.I), "llama_cpp",      "llama.cpp",        "llama_cpp"),
+    (re.compile(r"^llama[_-]cpp$",            re.I), "llama_cpp",      "llama.cpp",        "llama_cpp"),
+    (re.compile(r"^gpt4all$",                 re.I), "gpt4all",        "GPT4All",          "gpt4all"),
+    (re.compile(r"^transformers$",            re.I), "transformers",   "HuggingFace",      "transformers"),
+    (re.compile(r"^qwen[_-]?",               re.I), "qwen",           "Qwen",             "qwen"),
+    (re.compile(r"^ctransformers$",           re.I), "ctransformers",  "CTransformers",    "ctransformers"),
+    (re.compile(r"^mlx[_-]lm$",              re.I), "mlx_lm",         "MLX-LM (Apple)",   "mlx_lm"),
+    (re.compile(r"^openllm$",                re.I), "openllm",        "OpenLLM",          "openllm"),
+    (re.compile(r"^ollama$",                 re.I), "ollama",         "Ollama (Python)",  "ollama_py"),
+    (re.compile(r"^mistral[_-]?",            re.I), "mistral",        "Mistral",          "generic"),
+    (re.compile(r"^phi[_-]?",               re.I), "phi",            "Phi",              "generic"),
 ]
 
-_HUGGINGFACE_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
+# ---------------------------------------------------------------------------
+# Package scanning
+# ---------------------------------------------------------------------------
+
+def _normalize_pkg_name(name: str) -> str:
+    return re.sub(r"[-_]+", "-", name).lower()
 
 
-def _check_llama_cpp() -> bool:
-    try:
-        import llama_cpp  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-def _check_transformers() -> bool:
-    try:
-        import transformers  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-def _find_gguf_models() -> list[dict[str, str]]:
-    """Scan common paths for .gguf model files."""
+def scan_installed_llm_packages() -> list[dict[str, str]]:
+    """Return list of installed LLM packages found in this Python environment."""
     found: list[dict[str, str]] = []
     seen: set[str] = set()
-    for search_dir in _GGUF_SEARCH_PATHS:
-        if not search_dir.exists():
+
+    try:
+        dists = list(importlib.metadata.distributions())
+    except Exception:
+        return found
+
+    for dist in dists:
+        raw_name: str = dist.metadata.get("Name", "") or ""
+        if not raw_name:
             continue
-        for gguf_file in search_dir.rglob("*.gguf"):
-            if str(gguf_file) in seen:
-                continue
-            seen.add(str(gguf_file))
-            found.append({"name": gguf_file.stem, "path": str(gguf_file), "backend": "llama_cpp"})
+        norm = _normalize_pkg_name(raw_name)
+        if norm in seen:
+            continue
+
+        for pattern, module, display, adapter in _KNOWN_PACKAGES:
+            if pattern.search(norm):
+                # Verify the module is actually importable
+                try:
+                    importlib.import_module(module)
+                    importable = True
+                except ImportError:
+                    # Try dash→underscore variant
+                    alt = norm.replace("-", "_")
+                    try:
+                        importlib.import_module(alt)
+                        module = alt
+                        importable = True
+                    except ImportError:
+                        importable = False
+
+                seen.add(norm)
+                version = dist.metadata.get("Version", "")
+                found.append({
+                    "name": norm,
+                    "module": module,
+                    "display": f"{display} ({raw_name} {version})".strip(),
+                    "adapter": adapter,
+                    "importable": "true" if importable else "false",
+                    "version": version,
+                })
+                break
+
     return found
 
 
-def _find_hf_models() -> list[dict[str, str]]:
-    """Scan HuggingFace cache for locally downloaded models."""
-    if not _HUGGINGFACE_CACHE.exists():
-        return []
-    models = []
-    for model_dir in _HUGGINGFACE_CACHE.iterdir():
-        if model_dir.is_dir() and model_dir.name.startswith("models--"):
-            model_name = model_dir.name.removeprefix("models--").replace("--", "/")
-            models.append({"name": model_name, "path": str(model_dir), "backend": "transformers"})
-    return models
+# ---------------------------------------------------------------------------
+# Triangulation baseline
+# ---------------------------------------------------------------------------
 
-
-def _find_triangulation_models() -> list[dict[str, str]]:
-    """Return the single most recent triangulation baseline model."""
+def _find_triangulation_model() -> dict[str, str] | None:
     if not TRIANGULATION_DIR.exists():
-        return []
+        return None
     files = sorted(TRIANGULATION_DIR.glob("single_triangulation_baseline_*.json"))
     if not files:
-        return []
-    latest = files[-1]
-    return [{"name": "triangulation-baseline", "path": str(latest), "backend": "python_triangulation",
-             "display": "Triangulation Baseline (latest)"}]
+        return None
+    return {
+        "name": "triangulation-baseline",
+        "path": str(files[-1]),
+        "backend": "python_triangulation",
+        "display": "Triangulation Baseline (built-in, no LLM)",
+        "adapter": "triangulation",
+        "importable": "true",
+    }
 
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
 
 def _load_registry() -> list[dict[str, str]]:
-    """Load user-defined model registry if it exists."""
     if not REGISTRY_FILE.exists():
         return []
     try:
@@ -96,51 +128,38 @@ def _load_registry() -> list[dict[str, str]]:
         result = []
         for entry in entries:
             if isinstance(entry, str):
-                result.append({"name": entry, "path": "", "backend": "custom"})
+                result.append({"name": entry, "adapter": "custom", "display": entry})
             elif isinstance(entry, dict) and entry.get("name"):
-                result.append({
-                    "name": str(entry["name"]),
-                    "path": str(entry.get("path", "")),
-                    "backend": str(entry.get("backend", "custom")),
-                })
+                result.append({k: str(v) for k, v in entry.items()})
         return result
     except (json.JSONDecodeError, OSError):
         return []
 
 
-def discover_python_local_models() -> list[str]:
-    """Legacy: return list of model name strings for backward compatibility."""
-    return [m["name"] for m in discover_models_detailed()]
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def discover_models_detailed() -> list[dict[str, str]]:
-    """Return rich model entries with name, path, backend, and optional display label.
-
-    Entry format:
-        {name, path, backend, display?}
-    where backend is one of: llama_cpp | transformers | python_triangulation | custom
-    """
+    """Return all discoverable local Python LLM models with metadata."""
     models: list[dict[str, str]] = []
 
-    # Registry entries take priority
+    # 1. Registry overrides first
     models.extend(_load_registry())
 
-    # GGUF models (llama-cpp-python backend)
-    if _check_llama_cpp() or True:  # always scan — user might install later
-        models.extend(_find_gguf_models())
+    # 2. Installed LLM Python packages
+    models.extend(scan_installed_llm_packages())
 
-    # HuggingFace models
-    if _check_transformers() or True:
-        models.extend(_find_hf_models())
+    # 3. GGUF files in common locations (for llama-cpp-python users)
+    models.extend(_find_gguf_files())
 
-    # Other artifact types in the backend/models dir
-    if MODEL_DIR.exists():
-        for artifact in MODEL_DIR.iterdir():
-            if artifact.suffix.lower() in {".pt", ".pth", ".onnx", ".pkl", ".joblib"}:
-                models.append({"name": artifact.stem, "path": str(artifact), "backend": "custom"})
+    # 4. HuggingFace cached models
+    models.extend(_find_hf_cache())
 
-    # Project's own triangulation baseline
-    models.extend(_find_triangulation_models())
+    # 5. Built-in triangulation baseline
+    tri = _find_triangulation_model()
+    if tri:
+        models.append(tri)
 
     # Deduplicate by name
     seen: set[str] = set()
@@ -152,27 +171,234 @@ def discover_models_detailed() -> list[dict[str, str]]:
     return unique
 
 
-def infer_with_gguf(model_path: str, prompt: str, max_tokens: int = 512) -> str:
-    """Run inference via llama-cpp-python on a GGUF model file."""
-    try:
-        from llama_cpp import Llama  # type: ignore[import]
-        llm = Llama(model_path=model_path, n_ctx=2048, verbose=False)
-        output = llm(prompt, max_tokens=max_tokens, stop=["</s>", "\n\n"])
-        return output["choices"][0]["text"].strip()
-    except ImportError:
-        raise RuntimeError("llama-cpp-python is not installed. Run: pip install llama-cpp-python")
-    except Exception as exc:
-        raise RuntimeError(f"GGUF inference failed: {exc}") from exc
+def discover_python_local_models() -> list[str]:
+    """Legacy: list of model names for backward compatibility."""
+    return [m["name"] for m in discover_models_detailed()]
 
 
-def infer_with_transformers(model_name_or_path: str, prompt: str, max_new_tokens: int = 256) -> str:
-    """Run inference via HuggingFace transformers."""
+# ---------------------------------------------------------------------------
+# File-based model discovery helpers
+# ---------------------------------------------------------------------------
+
+_GGUF_SEARCH_DIRS = [
+    Path.home() / "models",
+    Path.home() / ".local" / "share" / "models",
+    Path.home() / ".local" / "share" / "nomic.ai" / "GPT4All",
+    Path("/opt/models"),
+    Path("/models"),
+    ROOT / "models",
+    ROOT / "backend" / "models",
+]
+
+
+def _find_gguf_files() -> list[dict[str, str]]:
+    found = []
+    seen: set[str] = set()
+    for d in _GGUF_SEARCH_DIRS:
+        if not d.exists():
+            continue
+        for f in d.rglob("*.gguf"):
+            if str(f) in seen:
+                continue
+            seen.add(str(f))
+            found.append({
+                "name": f"gguf:{f.stem}",
+                "path": str(f),
+                "adapter": "llama_cpp",
+                "display": f"llama.cpp: {f.name}",
+                "importable": "true" if _module_available("llama_cpp") else "false",
+            })
+    return found
+
+
+def _find_hf_cache() -> list[dict[str, str]]:
+    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+    if not hf_hub.exists():
+        return []
+    found = []
+    for d in hf_hub.iterdir():
+        if d.is_dir() and d.name.startswith("models--"):
+            model_id = d.name.removeprefix("models--").replace("--", "/")
+            found.append({
+                "name": f"hf:{model_id}",
+                "path": str(d),
+                "adapter": "transformers",
+                "display": f"HuggingFace: {model_id}",
+                "importable": "true" if _module_available("transformers") else "false",
+            })
+    return found
+
+
+def _module_available(module: str) -> bool:
     try:
-        from transformers import pipeline  # type: ignore[import]
-        pipe = pipeline("text-generation", model=model_name_or_path, max_new_tokens=max_new_tokens)
-        results = pipe(prompt)
-        return results[0]["generated_text"][len(prompt):].strip()
+        importlib.import_module(module)
+        return True
     except ImportError:
-        raise RuntimeError("transformers is not installed. Run: pip install transformers")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Inference adapters
+# ---------------------------------------------------------------------------
+
+def run_llm_inference(model_entry: dict[str, str], prompt: str, system_prompt: str = "") -> str:
+    """Dispatch inference to the appropriate adapter based on model_entry['adapter']."""
+    adapter = model_entry.get("adapter", "generic")
+
+    if adapter == "llama_cpp":
+        return _infer_llama_cpp(model_entry, prompt, system_prompt)
+    if adapter == "gpt4all":
+        return _infer_gpt4all(model_entry, prompt)
+    if adapter == "transformers":
+        return _infer_transformers(model_entry, prompt, system_prompt)
+    if adapter == "qwen":
+        return _infer_qwen(model_entry, prompt, system_prompt)
+    if adapter == "ctransformers":
+        return _infer_ctransformers(model_entry, prompt)
+    if adapter == "mlx_lm":
+        return _infer_mlx_lm(model_entry, prompt, system_prompt)
+    if adapter == "ollama_py":
+        return _infer_ollama_py(model_entry, prompt, system_prompt)
+    if adapter in ("generic", "custom", "mistral", "phi"):
+        return _infer_generic(model_entry, prompt, system_prompt)
+    raise RuntimeError(f"No adapter for: {adapter}")
+
+
+def _infer_llama_cpp(entry: dict, prompt: str, system: str) -> str:
+    from llama_cpp import Llama  # type: ignore[import]
+    path = entry.get("path", entry["name"])
+    llm = Llama(model_path=path, n_ctx=4096, verbose=False)
+    full = f"<|system|>\n{system}\n<|user|>\n{prompt}\n<|assistant|>\n" if system else prompt
+    out = llm(full, max_tokens=1024, stop=["<|user|>", "</s>"])
+    return out["choices"][0]["text"].strip()
+
+
+def _infer_gpt4all(entry: dict, prompt: str) -> str:
+    from gpt4all import GPT4All  # type: ignore[import]
+    model_name = entry.get("name", entry.get("path", ""))
+    m = GPT4All(model_name)
+    return m.generate(prompt, max_tokens=1024)
+
+
+def _infer_transformers(entry: dict, prompt: str, system: str) -> str:
+    from transformers import pipeline  # type: ignore[import]
+    model_id = entry.get("path", entry.get("name", ""))
+    if model_id.startswith("hf:"):
+        model_id = model_id[3:]
+    pipe = pipeline("text-generation", model=model_id, max_new_tokens=512)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    result = pipe(messages)
+    generated = result[0].get("generated_text", "")
+    if isinstance(generated, list):
+        return generated[-1].get("content", "")
+    return generated[len(prompt):].strip() if generated.startswith(prompt) else generated
+
+
+def _infer_qwen(entry: dict, prompt: str, system: str) -> str:
+    """Adapter for Qwen packages (qwen, qwen2, qwen3, qwen-agent variants)."""
+    module_name = entry.get("module", "qwen")
+
+    # Try qwen_agent style
+    try:
+        mod = importlib.import_module(module_name)
+        # Many Qwen packages expose a simple chat function
+        if hasattr(mod, "chat"):
+            return str(mod.chat(prompt))
+        if hasattr(mod, "generate"):
+            return str(mod.generate(prompt))
+        # Try model class pattern
+        for cls_name in ("Model", "Qwen", "QwenModel", "LLM"):
+            if hasattr(mod, cls_name):
+                instance = getattr(mod, cls_name)()
+                for method in ("chat", "generate", "__call__"):
+                    if hasattr(instance, method):
+                        return str(getattr(instance, method)(prompt))
     except Exception as exc:
-        raise RuntimeError(f"Transformers inference failed: {exc}") from exc
+        _log.debug("Qwen direct API failed: %s", exc)
+
+    # Fallback: try via transformers (Qwen models are HF-compatible)
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore[import]
+        import torch  # type: ignore[import]
+        model_id = entry.get("name", "Qwen/Qwen2.5-0.5B-Instruct")
+        # Strip qwen- prefix if it looks like a package name not a model ID
+        if "/" not in model_id:
+            model_id = f"Qwen/{model_id}"
+        tok = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="auto")
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tok([text], return_tensors="pt")
+        out = model.generate(**inputs, max_new_tokens=512)
+        generated = tok.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        return generated.strip()
+    except Exception as exc:
+        raise RuntimeError(f"Qwen inference failed: {exc}") from exc
+
+
+def _infer_ctransformers(entry: dict, prompt: str) -> str:
+    from ctransformers import AutoModelForCausalLM  # type: ignore[import]
+    path = entry.get("path", entry["name"])
+    llm = AutoModelForCausalLM.from_pretrained(path)
+    return llm(prompt)
+
+
+def _infer_mlx_lm(entry: dict, prompt: str, system: str) -> str:
+    from mlx_lm import load, generate  # type: ignore[import]
+    model_id = entry.get("path", entry.get("name", ""))
+    model, tokenizer = load(model_id)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    formatted = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+    return generate(model, tokenizer, prompt=formatted, max_tokens=512, verbose=False)
+
+
+def _infer_ollama_py(entry: dict, prompt: str, system: str) -> str:
+    """Use the ollama Python library (not the daemon HTTP API)."""
+    import ollama  # type: ignore[import]
+    model_id = entry.get("name", "").replace("ollama:", "")
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    resp = ollama.chat(model=model_id, messages=messages)
+    return resp["message"]["content"]
+
+
+def _infer_generic(entry: dict, prompt: str, system: str) -> str:
+    """Try common inference patterns for unknown LLM packages."""
+    module_name = entry.get("module", entry.get("name", ""))
+    try:
+        mod = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise RuntimeError(f"Cannot import {module_name}: {exc}") from exc
+
+    full_prompt = f"{system}\n\n{prompt}" if system else prompt
+
+    # Try top-level functions
+    for fn_name in ("chat", "generate", "complete", "run", "ask"):
+        if callable(getattr(mod, fn_name, None)):
+            return str(getattr(mod, fn_name)(full_prompt))
+
+    # Try instantiating a class
+    for cls_name in ("Model", "LLM", "Chat", "Assistant"):
+        cls = getattr(mod, cls_name, None)
+        if cls is None:
+            continue
+        try:
+            instance = cls()
+            for method in ("chat", "generate", "complete", "__call__"):
+                if callable(getattr(instance, method, None)):
+                    return str(getattr(instance, method)(full_prompt))
+        except Exception:
+            continue
+
+    raise RuntimeError(f"No known inference API found in {module_name}")
