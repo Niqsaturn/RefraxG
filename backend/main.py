@@ -1929,6 +1929,64 @@ async def _capture_loop() -> None:
         logger.info("analysis loop auto-started: provider=%s model=%s", provider, model)
     except Exception as exc:
         logger.warning("analysis loop auto-start failed: %s", exc)
+    # Auto-seed public transmitter data (FCC + towers) for major population centres
+    try:
+        _asyncio.create_task(_auto_seed_public_emitters())
+    except Exception:
+        pass
+
+
+async def _auto_seed_public_emitters() -> None:
+    """Seed FCC + tower data for a spread of US regions at startup.
+
+    Seeds ~20 tiles covering major population centres so the map is populated
+    with publicly-licensed transmitter origin points on first load, without
+    requiring any manual seed action.
+    """
+    import asyncio as _aio
+    from backend.analysis.us_coverage import seed_tile, _tile_bounds, _tile_id
+
+    # Grid of representative US lat/lon centres (~2-degree tiles)
+    _SEED_CENTRES = [
+        (40.71, -74.01),  # New York
+        (34.05, -118.24), # Los Angeles
+        (41.88, -87.63),  # Chicago
+        (29.76, -95.37),  # Houston
+        (33.45, -112.07), # Phoenix
+        (39.95, -75.17),  # Philadelphia
+        (29.42, -98.49),  # San Antonio
+        (32.78, -96.80),  # Dallas
+        (37.34, -121.89), # San Jose
+        (30.33, -81.66),  # Jacksonville
+        (47.61, -122.33), # Seattle
+        (39.74, -104.98), # Denver
+        (30.27, -97.74),  # Austin
+        (36.17, -86.78),  # Nashville
+        (45.52, -122.68), # Portland
+        (35.47, -97.52),  # Oklahoma City
+        (38.90, -77.04),  # Washington DC
+        (42.36, -71.06),  # Boston
+        (36.17, -115.14), # Las Vegas
+        (44.98, -93.27),  # Minneapolis
+    ]
+    await _aio.sleep(5)  # let server fully start first
+    for lat, lon in _SEED_CENTRES:
+        try:
+            from backend.analysis.us_coverage import _operator_tile
+            lat_f, lon_f = _operator_tile(lat, lon)
+            lat_min, lon_min, lat_max, lon_max = _tile_bounds(lat_f, lon_f)
+            tile = {
+                "tile_id": _tile_id(lat_f, lon_f),
+                "lat_min": lat_min, "lon_min": lon_min,
+                "lat_max": lat_max, "lon_max": lon_max,
+                "center_lat": lat, "center_lon": lon,
+            }
+            count = await seed_tile(tile)
+            if count > 0:
+                logger.debug("auto-seed %s,%s: %d features", lat, lon, count)
+        except Exception as exc:
+            logger.debug("auto-seed tile failed %s,%s: %s", lat, lon, exc)
+        await _aio.sleep(1)  # throttle external API calls
 
 
 async def node_pool_auto_populate_loop() -> None:
@@ -2013,6 +2071,97 @@ def get_em_fields():
             if f.get("properties", {}).get("kind") == "em_field"
         ]
         return {"type": "FeatureCollection", "features": em_features}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/propagation/footprints")
+def propagation_footprints(
+    lat_min: float = Query(default=-90.0),
+    lat_max: float = Query(default=90.0),
+    lon_min: float = Query(default=-180.0),
+    lon_max: float = Query(default=180.0),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    """Return GeoJSON FeatureCollection of propagation-reach polygons.
+
+    Each polygon shows how far one emitter's signal can travel, coloured by
+    frequency band. HF features include a donut (inner dead-zone = skip distance).
+    VLF/ELF features render as near-global circles.
+    """
+    try:
+        from backend.storage.map_store import get_all_features
+        from backend.rf.propagation_footprint import build_all_footprints
+
+        fc = get_all_features(limit=limit)
+        # include all kinds (infrastructure, estimate, speculative)
+        features = [
+            f for f in fc.get("features", [])
+            if f.get("geometry", {}).get("type") == "Point"
+        ]
+        footprints = build_all_footprints(features)
+        return {"type": "FeatureCollection", "features": footprints}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/propagation/interference")
+def propagation_interference(
+    lat_min: float = Query(default=-90.0),
+    lat_max: float = Query(default=90.0),
+    lon_min: float = Query(default=-180.0),
+    lon_max: float = Query(default=180.0),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    """Return GeoJSON heatmap points for co-channel interference zones.
+
+    Points carry interference_ratio (>1 constructive, <1 destructive) and
+    field_strength_dbvm. Render with a MapLibre heatmap layer.
+    """
+    try:
+        from backend.storage.map_store import get_all_features
+        from backend.rf.interference_calculator import compute_interference_zones
+
+        fc = get_all_features(limit=limit)
+        features = [
+            f for f in fc.get("features", [])
+            if f.get("geometry", {}).get("type") == "Point"
+        ]
+        points = compute_interference_zones(features)
+        return {"type": "FeatureCollection", "features": points}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/features/vlf-elf")
+def vlf_elf_features(limit: int = Query(default=500, ge=1, le=2000)):
+    """Return all VLF/ELF/UWB emitters as a dedicated GeoJSON layer.
+
+    VLF/ELF (< 30 kHz): global-range waveguide propagators — NAVTEX, OMEGA, submarine comms.
+    UWB (3.1–10.6 GHz): ultra-short-range high-bandwidth devices.
+    All publicly seeded from FCC/ITU data; user-filtered downstream.
+    """
+    try:
+        from backend.storage.map_store import get_all_features
+        from backend.rf.propagation_footprint import freq_hz_from_band_name, is_vlf_elf, is_uwb
+
+        fc = get_all_features(limit=limit)
+        vlf_features = []
+        for f in fc.get("features", []):
+            props = f.get("properties", {})
+            freq_hz = float(props.get("frequency_hz") or props.get("freq_hz") or 0)
+            if freq_hz <= 0:
+                freq_hz = freq_hz_from_band_name(str(props.get("freq_band", "")))
+            if is_vlf_elf(freq_hz) or is_uwb(freq_hz):
+                # Annotate with display metadata
+                f["properties"]["freq_hz"] = freq_hz
+                f["properties"]["display_label"] = (
+                    "VLF" if freq_hz < 30_000 else
+                    "ELF" if freq_hz < 3_000 else
+                    "UWB"
+                )
+                vlf_features.append(f)
+        return {"type": "FeatureCollection", "features": vlf_features}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

@@ -703,6 +703,10 @@ map.on('load', async () => {
   setInterval(refreshCoverage, 60000);
   setInterval(refreshCalibration, 60000);
   setInterval(refreshUncertain, 60000);
+  // Refresh propagation layers every 90 s (they depend on feature store contents)
+  setInterval(() => { if (propagationToggle?.checked) _loadPropagationFootprints(); }, 90000);
+  setInterval(() => { if (interferenceToggle?.checked) _loadInterferenceZones(); }, 90000);
+  setInterval(() => { if (vlfElfToggle?.checked) _loadVlfElfEmitters(); }, 90000);
 
   // ── Fox hunt / waterfall / SSE initialization ─────────────────────────────
   _addFoxSources();
@@ -739,13 +743,19 @@ const waterfallCanvas= document.getElementById('waterfallCanvas');
 const wfFreqAxis     = document.getElementById('waterfallFreqAxis');
 const waterfallStatus = document.getElementById('waterfallStatus');
 const peakList       = document.getElementById('peakList');
-const foxToggle      = document.getElementById('foxToggle');
-const bearingRayToggle = document.getElementById('bearingRayToggle');
-const waterfallHeader = document.getElementById('waterfallHeader');
-const waterfallContainer = document.getElementById('waterfallContainer');
-const peakListHeader = document.getElementById('peakListHeader');
-const autoHuntToggle = document.getElementById('autoHuntToggle');
-const autoPolicyPhase = document.getElementById('autoPolicyPhase');
+const foxToggle           = document.getElementById('foxToggle');
+const bearingRayToggle    = document.getElementById('bearingRayToggle');
+const waterfallHeader     = document.getElementById('waterfallHeader');
+const waterfallContainer  = document.getElementById('waterfallContainer');
+const peakListHeader      = document.getElementById('peakListHeader');
+const autoHuntToggle      = document.getElementById('autoHuntToggle');
+const autoPolicyPhase     = document.getElementById('autoPolicyPhase');
+const emFieldToggle       = document.getElementById('emFieldToggle');
+const beamPatternToggle   = document.getElementById('beamPatternToggle');
+const propagationToggle   = document.getElementById('propagationToggle');
+const skipZoneToggle      = document.getElementById('skipZoneToggle');
+const interferenceToggle  = document.getElementById('interferenceToggle');
+const vlfElfToggle        = document.getElementById('vlfElfToggle');
 let _autoHuntEnabled = false;
 
 // ── Waterfall state ───────────────────────────────────────────────────────
@@ -919,8 +929,11 @@ function _addFoxSources() {
   map.addSource('fox-ellipses', { type: 'geojson', data: empty });
   map.addSource('fox-bearings', { type: 'geojson', data: empty });
   map.addSource('bayes-field',  { type: 'geojson', data: empty });
-  map.addSource('em-fields',    { type: 'geojson', data: empty });
-  map.addSource('beam-patterns', { type: 'geojson', data: empty });
+  map.addSource('em-fields',             { type: 'geojson', data: empty });
+  map.addSource('beam-patterns',         { type: 'geojson', data: empty });
+  map.addSource('propagation-footprints',{ type: 'geojson', data: empty });
+  map.addSource('interference-zones',    { type: 'geojson', data: empty });
+  map.addSource('vlf-elf-emitters',      { type: 'geojson', data: empty });
 
   // Bayesian posterior heatmap (rendered below fox layers)
   map.addLayer({ id: 'bayes-fill', type: 'fill', source: 'bayes-field',
@@ -944,6 +957,84 @@ function _addFoxSources() {
   map.addLayer({ id: 'beam-patterns-line', type: 'line', source: 'beam-patterns',
     layout: { visibility: 'none' },
     paint: { 'line-color': '#fb923c', 'line-width': 1.5, 'line-dasharray': [4, 2] } });
+
+  // ── Propagation footprints ───────────────────────────────────────────────
+  // Soft fill coloured by frequency band
+  map.addLayer({ id: 'propagation-fill', type: 'fill', source: 'propagation-footprints',
+    layout: { visibility: 'none' },
+    paint: { 'fill-color': ['get', 'band_color'], 'fill-opacity': 0.06 } });
+  // Dashed outline at max-range boundary
+  map.addLayer({ id: 'propagation-outline', type: 'line', source: 'propagation-footprints',
+    layout: { visibility: 'none' },
+    paint: {
+      'line-color': ['get', 'band_color'],
+      'line-width': ['case', ['get', 'is_global'], 2.5, 1.5],
+      'line-opacity': 0.7,
+      'line-dasharray': ['case', ['get', 'is_hf'], ['literal', [6, 3]], ['literal', [3, 2]]],
+    } });
+  // Distance label at centroid (only at zoom ≥ 4 to avoid clutter)
+  map.addLayer({ id: 'propagation-label', type: 'symbol', source: 'propagation-footprints',
+    layout: {
+      visibility: 'none',
+      'text-field': ['concat', ['get', 'mode'], '\n', ['to-string', ['get', 'max_range_km']], ' km'],
+      'text-size': 10,
+      'symbol-placement': 'point',
+    },
+    paint: { 'text-color': ['get', 'band_color'], 'text-halo-color': '#000', 'text-halo-width': 1.5 },
+    minzoom: 3 });
+
+  // ── Interference heatmap ─────────────────────────────────────────────────
+  map.addLayer({ id: 'interference-heatmap', type: 'heatmap', source: 'interference-zones',
+    layout: { visibility: 'none' },
+    paint: {
+      'heatmap-weight': ['interpolate', ['linear'], ['get', 'interference_ratio'], 0, 1, 1, 0, 2, 1],
+      'heatmap-intensity': 1.2,
+      'heatmap-color': [
+        'interpolate', ['linear'], ['heatmap-density'],
+        0,   'rgba(0,0,0,0)',
+        0.2, 'rgba(239,68,68,0.35)',    // destructive — red
+        0.5, 'rgba(107,114,128,0.2)',   // neutral — grey
+        0.8, 'rgba(34,197,94,0.35)',    // constructive — green
+        1.0, 'rgba(74,222,128,0.55)',
+      ],
+      'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 1, 60, 8, 20],
+      'heatmap-opacity': 0.75,
+    } });
+
+  // ── VLF / ELF / UWB emitter markers ─────────────────────────────────────
+  map.addLayer({ id: 'vlf-elf-layer', type: 'circle', source: 'vlf-elf-emitters',
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': 10,
+      'circle-color': '#7c3aed',
+      'circle-stroke-width': 2.5,
+      'circle-stroke-color': '#e9d5ff',
+      'circle-opacity': 0.9,
+    } });
+  map.addLayer({ id: 'vlf-elf-label', type: 'symbol', source: 'vlf-elf-emitters',
+    layout: {
+      visibility: 'none',
+      'text-field': ['concat', ['get', 'display_label'], ' · ', ['get', 'name']],
+      'text-size': 10,
+      'text-offset': [0, 1.4],
+    },
+    paint: { 'text-color': '#c4b5fd', 'text-halo-color': '#000', 'text-halo-width': 1.2 } });
+
+  // ── Click handler for VLF/ELF emitters ──────────────────────────────────
+  map.on('click', 'vlf-elf-layer', (e) => {
+    const f = e.features?.[0];
+    if (!f || !details) return;
+    const p = f.properties;
+    details.innerHTML = `<strong>${p.name || p.id}</strong><br>` +
+      `Band: <strong>${p.display_label}</strong><br>` +
+      `Freq: ${p.freq_mhz} MHz<br>` +
+      `Mode: ${p.mode || '—'}<br>` +
+      `Max range: ${p.max_range_km} km<br>` +
+      `EIRP: ${p.eirp_dbm} dBm<br>` +
+      `Kind: ${p.kind}`;
+  });
+  map.on('mouseenter', 'vlf-elf-layer', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'vlf-elf-layer', () => { map.getCanvas().style.cursor = ''; });
 
   // Uncertainty ellipses (fill + outline)
   map.addLayer({ id: 'fox-ellipse-fill', type: 'fill', source: 'fox-ellipses',
@@ -1378,10 +1469,73 @@ beamPatternToggle?.addEventListener('change', () => {
   try { map.setLayoutProperty('beam-patterns-line', 'visibility', vis); } catch {}
 });
 
+propagationToggle?.addEventListener('change', () => {
+  const vis = propagationToggle.checked ? 'visible' : 'none';
+  ['propagation-fill', 'propagation-outline', 'propagation-label'].forEach((l) => {
+    try { map.setLayoutProperty(l, 'visibility', vis); } catch {}
+  });
+  if (propagationToggle.checked) _loadPropagationFootprints();
+});
+
+skipZoneToggle?.addEventListener('change', () => {
+  // Skip zones are encoded as donut polygons within propagation-footprints;
+  // toggling this filters the layer to show only HF donuts
+  const vis = skipZoneToggle.checked ? 'visible' : 'none';
+  try {
+    map.setFilter('propagation-fill',    skipZoneToggle.checked ? null : ['!', ['get', 'is_hf']]);
+    map.setFilter('propagation-outline', skipZoneToggle.checked ? null : null);
+    map.setLayoutProperty('propagation-fill',    'visibility', vis);
+    map.setLayoutProperty('propagation-outline', 'visibility', vis);
+  } catch {}
+  if (skipZoneToggle.checked) _loadPropagationFootprints();
+});
+
+interferenceToggle?.addEventListener('change', () => {
+  const vis = interferenceToggle.checked ? 'visible' : 'none';
+  try { map.setLayoutProperty('interference-heatmap', 'visibility', vis); } catch {}
+  if (interferenceToggle.checked) _loadInterferenceZones();
+});
+
+vlfElfToggle?.addEventListener('change', () => {
+  const vis = vlfElfToggle.checked ? 'visible' : 'none';
+  ['vlf-elf-layer', 'vlf-elf-label'].forEach((l) => {
+    try { map.setLayoutProperty(l, 'visibility', vis); } catch {}
+  });
+  if (vlfElfToggle.checked) _loadVlfElfEmitters();
+});
+
 async function _loadEmFields() {
   try {
     const data = await fetch('/api/em_fields').then((r) => r.json());
     const src = map.getSource('em-fields');
+    if (src) src.setData(data);
+  } catch {}
+}
+
+async function _loadPropagationFootprints() {
+  try {
+    const b = map.getBounds();
+    const url = `/api/propagation/footprints?lat_min=${b.getSouth().toFixed(3)}&lat_max=${b.getNorth().toFixed(3)}&lon_min=${b.getWest().toFixed(3)}&lon_max=${b.getEast().toFixed(3)}`;
+    const data = await fetch(url).then((r) => r.json());
+    const src = map.getSource('propagation-footprints');
+    if (src) src.setData(data);
+  } catch {}
+}
+
+async function _loadInterferenceZones() {
+  try {
+    const b = map.getBounds();
+    const url = `/api/propagation/interference?lat_min=${b.getSouth().toFixed(3)}&lat_max=${b.getNorth().toFixed(3)}&lon_min=${b.getWest().toFixed(3)}&lon_max=${b.getEast().toFixed(3)}`;
+    const data = await fetch(url).then((r) => r.json());
+    const src = map.getSource('interference-zones');
+    if (src) src.setData(data);
+  } catch {}
+}
+
+async function _loadVlfElfEmitters() {
+  try {
+    const data = await fetch('/api/features/vlf-elf').then((r) => r.json());
+    const src = map.getSource('vlf-elf-emitters');
     if (src) src.setData(data);
   } catch {}
 }
