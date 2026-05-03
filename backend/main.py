@@ -835,11 +835,19 @@ def discover_ollama_models() -> list[str]:
 
 
 def discover_python_local_models() -> list[str]:
-    return sorted(f.stem for f in MODELS_DIR.glob("*.json")) if MODELS_DIR.exists() else []
+    from backend.model_providers.python_local import discover_models_detailed
+    return [m["name"] for m in discover_models_detailed()]
 
 
-def discover_available_models() -> dict[str, list[str]]:
-    return {"ollama": discover_ollama_models(), "python_local": discover_python_local_models()}
+def discover_available_models() -> dict[str, Any]:
+    from backend.model_providers.python_local import discover_models_detailed
+    ollama = discover_ollama_models()
+    py_models = discover_models_detailed()
+    return {
+        "ollama": ollama,
+        "python_local": [m["name"] for m in py_models],
+        "python_local_detailed": py_models,
+    }
 
 
 def run_inference(provider: str, model: str, payload: dict) -> dict:
@@ -854,6 +862,21 @@ def run_inference(provider: str, model: str, payload: dict) -> dict:
         with request.urlopen(req, timeout=30.0) as resp:
             return json.loads(resp.read().decode("utf-8"))
     if provider == "python_local":
+        # GGUF model via llama-cpp-python
+        if model.endswith(".gguf") or _is_gguf_model(model):
+            from backend.model_providers.python_local import infer_with_gguf, discover_models_detailed
+            model_path = _resolve_model_path(model, "llama_cpp", discover_models_detailed())
+            prompt = payload.get("prompt", "")
+            text = infer_with_gguf(model_path, prompt)
+            return {"provider": provider, "model": model, "response": text}
+        # HuggingFace transformers model
+        if _is_hf_model(model):
+            from backend.model_providers.python_local import infer_with_transformers, discover_models_detailed
+            model_path = _resolve_model_path(model, "transformers", discover_models_detailed())
+            prompt = payload.get("prompt", "")
+            text = infer_with_transformers(model_path or model, prompt)
+            return {"provider": provider, "model": model, "response": text}
+        # Triangulation baseline WLS
         samples_raw = payload.get("samples", [])
         if samples_raw:
             try:
@@ -871,6 +894,29 @@ def run_inference(provider: str, model: str, payload: dict) -> dict:
                 return {"provider": provider, "model": model, "error": str(exc)}
         return {"provider": provider, "model": model, "output": "no samples provided"}
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+
+def _is_gguf_model(name: str) -> bool:
+    from backend.model_providers.python_local import discover_models_detailed
+    for m in discover_models_detailed():
+        if m["name"] == name and m.get("backend") == "llama_cpp":
+            return True
+    return False
+
+
+def _is_hf_model(name: str) -> bool:
+    from backend.model_providers.python_local import discover_models_detailed
+    for m in discover_models_detailed():
+        if m["name"] == name and m.get("backend") == "transformers":
+            return True
+    return False
+
+
+def _resolve_model_path(name: str, backend: str, models: list[dict]) -> str:
+    for m in models:
+        if m["name"] == name and m.get("backend") == backend:
+            return m.get("path", name)
+    return name
 
 
 def _parse_timestamp(value: str) -> datetime | None:
