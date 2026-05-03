@@ -747,6 +747,7 @@ def _target_to_feature(target: FoxTarget) -> dict:
             "ellipse_polygon": ellipse_coords,
             "ellipse_major_m": fix.ellipse_major_m,
             "ellipse_minor_m": fix.ellipse_minor_m,
+            "azimuth_deg": _mean_bearing(target.bearing_obs),
             "beamwidth_deg": 360,
             "ray_length_m": max(200, int(fix.uncertainty_m * 0.3)),
             "wedge_radius_m": max(300, int(fix.uncertainty_m * 0.5)),
@@ -757,6 +758,16 @@ def _target_to_feature(target: FoxTarget) -> dict:
             ],
         },
     }
+
+
+def _mean_bearing(bearing_obs: list) -> float | None:
+    """Circular mean of bearing observations (handles 359°/1° wrap-around)."""
+    if not bearing_obs:
+        return None
+    import math
+    sin_sum = sum(math.sin(math.radians(b.bearing_deg)) for b in bearing_obs)
+    cos_sum = sum(math.cos(math.radians(b.bearing_deg)) for b in bearing_obs)
+    return round((math.degrees(math.atan2(sin_sum, cos_sum)) + 360) % 360, 1)
 
 
 def _pin_confidence_threshold(target: FoxTarget) -> float:

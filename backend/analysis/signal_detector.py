@@ -1,18 +1,20 @@
 """AI-powered RF signal detection.
 
-Calls the selected Ollama or python_local model to analyze recent telemetry
+Calls locally installed Python LLM packages to analyze recent telemetry
 observations and extract structured signal detections.  Audio content is
 never decoded — only carrier metadata is analyzed.
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from urllib import error, request
+
+_log = logging.getLogger(__name__)
 
 # Audio-bearing frequency bands whose content must not be characterized
 _AUDIO_BANDS = {
@@ -113,23 +115,15 @@ def _format_user_prompt(
     return "\n".join(parts)
 
 
-def _call_ollama(model: str, user_prompt: str, timeout: float = 60.0) -> str:
-    body = json.dumps({
-        "model": model,
-        "system": _SYSTEM_PROMPT,
-        "prompt": user_prompt,
-        "stream": False,
-        "options": {"temperature": 0.2},
-    }).encode("utf-8")
-    req = request.Request(
-        "http://127.0.0.1:11434/api/generate",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with request.urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    return payload.get("response", "")
+def _call_python_llm(model_name: str, user_prompt: str) -> str:
+    """Invoke a locally installed Python LLM package directly."""
+    from backend.model_providers.python_local import discover_models_detailed, run_llm_inference
+
+    models = discover_models_detailed()
+    entry = next((m for m in models if m["name"] == model_name), None)
+    if entry is None:
+        raise RuntimeError(f"Model '{model_name}' not found in installed Python packages")
+    return run_llm_inference(entry, user_prompt, system_prompt=_SYSTEM_PROMPT)
 
 
 def _parse_detections(raw: str) -> tuple[list[SignalDetection], str]:
@@ -293,17 +287,18 @@ def detect_signals(
 ) -> DetectionResult:
     """Analyze telemetry samples and return structured signal detections.
 
-    Uses Ollama when provider='ollama', rule-based fallback otherwise.
+    Uses a locally installed Python LLM package when provider='python_local'
+    and a model name is given; otherwise falls back to rule-based detection.
     Audio content is scrubbed before any model call.
     """
     provider = model_config.get("provider", "local")
     model = model_config.get("model", "")
 
-    if provider == "ollama" and model:
+    if provider == "python_local" and model and model != "triangulation-baseline":
         t0 = time.monotonic()
         user_prompt = _format_user_prompt(samples, fcc_context or [], examples_text)
         try:
-            raw = _call_ollama(model, user_prompt)
+            raw = _call_python_llm(model, user_prompt)
             detections, summary = _parse_detections(raw)
             ms = (time.monotonic() - t0) * 1000
             return DetectionResult(
@@ -312,10 +307,11 @@ def detect_signals(
                 raw_response=raw,
                 processing_ms=round(ms, 1),
             )
-        except (error.URLError, TimeoutError, OSError) as exc:
-            return DetectionResult(error=f"Ollama unavailable: {exc}")
+        except Exception as exc:
+            _log.warning("Python LLM inference failed (%s): %s", model, exc)
+            return DetectionResult(error=f"LLM inference failed: {exc}")
 
-    # python_local or local fallback
+    # triangulation-baseline or no model selected → rule-based
     return _python_local_detections(samples, operator_lat, operator_lon)
 
 

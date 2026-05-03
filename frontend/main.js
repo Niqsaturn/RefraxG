@@ -82,8 +82,6 @@ const renderHealthStatus = document.getElementById('renderHealthStatus');
 const sdrEventStatus = document.getElementById('sdrEventStatus');
 const modelDropdown   = document.getElementById('modelSelect');
 const satGroupSelect  = document.getElementById('satGroup');
-const analyzeBtn      = document.getElementById('analyzeNow');
-const seedBtn         = document.getElementById('seedRegion');
 const loopIntervalEl  = document.getElementById('loopInterval');
 const analysisLog     = document.getElementById('analysisLog');
 const logHeader       = document.getElementById('analysisLogHeader');
@@ -99,6 +97,19 @@ const health = {
   render: { features: 'pending', speculative: 'pending', satellites: 'pending', fox_targets: 'pending' },
 };
 
+
+function _addBearingArrowIcon() {
+  return new Promise((resolve) => {
+    if (map.hasImage('bearing-arrow')) { resolve(); return; }
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+      <polygon points="14,2 22,24 14,19 6,24" fill="#4ade80" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>
+    </svg>`;
+    const img = new Image(28, 28);
+    img.onload = () => { map.addImage('bearing-arrow', img); resolve(); };
+    img.onerror = resolve;
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
 
 function _hasValidGlyphs() {
   try {
@@ -241,8 +252,7 @@ async function populateModelDropdown() {
   if (!modelDropdown) return;
   try {
     const data = await fetch('/api/models/discover').then((r) => r.json());
-    const options = [['', '— None —']];
-    (data.ollama || []).forEach((m) => options.push([`ollama/${m}`, `Ollama: ${m}`]));
+    const options = [['', '— Select a model —']];
     const detailed = data.python_local_detailed || [];
     if (detailed.length > 0) {
       detailed.forEach((entry) => {
@@ -250,8 +260,10 @@ async function populateModelDropdown() {
         options.push([`python_local/${entry.name}`, label]);
       });
     } else {
-      // fallback to plain list if detailed not present
       (data.python_local || []).forEach((m) => options.push([`python_local/${m}`, `Local: ${m}`]));
+    }
+    if (options.length === 1) {
+      options.push(['', '— No local Python LLMs detected —']);
     }
     modelDropdown.innerHTML = options.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
     if (selectedModel) modelDropdown.value = selectedModel;
@@ -399,50 +411,28 @@ async function refreshAnalysisLog() {
   } catch (_) { if (analysisLog) analysisLog.innerHTML = '<span class="muted">unavailable</span>'; }
 }
 
-// ── Analyze Now button ─────────────────────────────────────────────────────
-async function analyzeNow() {
-  if (!analyzeBtn) return;
-  analyzeBtn.disabled = true;
-  analyzeBtn.textContent = 'Analyzing…';
-  try {
-    const center = map.getCenter();
-    const [provider, ...rest] = (selectedModel || '/').split('/');
-    const model = rest.join('/');
-    const body = { provider: provider || 'local', model, lat: center.lat, lon: center.lng, limit_samples: 50 };
-    const result = await fetch('/api/analysis/run', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }).then((r) => r.json());
-    await refreshSpeculative();
-    await refreshAnalysisLog();
-    if (details) details.innerHTML = `Analysis: ${result.detections} detection(s) · ${result.speculative_features_added} features added<br><em>${result.summary || ''}</em>`;
-  } catch (err) {
-    if (details) details.textContent = `Analysis error: ${err.message}`;
-  } finally {
-    analyzeBtn.disabled = false;
-    analyzeBtn.textContent = 'Analyze Now';
-  }
+// ── Viewport auto-seed (fires when user pans map to a new area) ────────────
+let _lastSeedCenter = null;
+let _lastSeedTime = 0;
+
+function _haversineKm(a, b) {
+  const R = 6371, toRad = (d) => d * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.asin(Math.sqrt(h));
 }
 
-// ── Seed Region button ─────────────────────────────────────────────────────
-async function seedRegion() {
-  if (!seedBtn) return;
-  seedBtn.disabled = true;
-  seedBtn.textContent = 'Seeding…';
-  try {
-    const center = map.getCenter();
-    const result = await fetch(
-      `/api/map/seed?lat=${center.lat.toFixed(5)}&lon=${center.lng.toFixed(5)}&radius_km=50`,
-      { method: 'POST' }
-    ).then((r) => r.json());
-    await refreshSpeculative();
-    await refreshCoverage();
-    if (details) details.textContent = `Seeded: ${result.features_added} features added from FCC + towers.`;
-  } catch (err) {
-    if (details) details.textContent = `Seed error: ${err.message}`;
-  } finally {
-    seedBtn.disabled = false;
-    seedBtn.textContent = 'Seed Region';
-  }
+function _autoSeedViewport() {
+  const center = map.getCenter();
+  const shifted = !_lastSeedCenter || _haversineKm(center, _lastSeedCenter) > 50;
+  const throttled = Date.now() - _lastSeedTime < 30000;
+  if (!shifted || throttled) return;
+  _lastSeedCenter = center;
+  _lastSeedTime = Date.now();
+  fetch(`/api/map/seed?lat=${center.lat.toFixed(5)}&lon=${center.lng.toFixed(5)}&radius_km=50`, { method: 'POST' })
+    .then((r) => r.json())
+    .then((d) => { if (d.features_added > 0) { refreshSpeculative(); refreshSites(); } })
+    .catch(() => {});
 }
 
 // ── Feature confirm/dismiss (called from popup HTML) ──────────────────────
@@ -690,9 +680,10 @@ map.on('load', async () => {
   });
   satGroupSelect?.addEventListener('change', refreshSatellites);
 
-  // ── Button listeners ──────────────────────────────────────────────────────
-  analyzeBtn?.addEventListener('click', analyzeNow);
-  seedBtn?.addEventListener('click', seedRegion);
+  // ── Viewport auto-seed on map pan ─────────────────────────────────────────
+  map.on('moveend', _autoSeedViewport);
+
+  // ── Loop interval config ──────────────────────────────────────────────────
   loopIntervalEl?.addEventListener('change', async () => {
     const interval = parseInt(loopIntervalEl.value, 10);
     if (selectedModel) await applyModelSelection(selectedModel);
@@ -1073,6 +1064,27 @@ function _addFoxSources() {
       'circle-stroke-width': 2.5,
       'circle-stroke-color': '#fff',
     } });
+
+  // Directional bearing arrow overlay on confirmed targets
+  // icon-rotate reads azimuth_deg from each feature's properties for real-time
+  // rotation updates — MapLibre re-renders automatically when source data changes.
+  _addBearingArrowIcon().then(() => {
+    map.addLayer({
+      id: 'fox-bearing-arrows',
+      type: 'symbol',
+      source: 'fox-targets',
+      layout: {
+        'icon-image': 'bearing-arrow',
+        'icon-size': 1.2,
+        'icon-rotate': ['coalesce', ['get', 'azimuth_deg'], 0],
+        'icon-rotation-alignment': 'map',
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+      },
+      filter: ['has', 'azimuth_deg'],
+    });
+  });
+
   if (_hasValidGlyphs()) {
     map.addLayer({ id: 'fox-target-label', type: 'symbol', source: 'fox-targets',
       layout: { 'text-field': ['get', 'freq_label'], 'text-font': ['Noto Sans Regular'], 'text-size': 9, 'text-offset': [0, 1.6] },
