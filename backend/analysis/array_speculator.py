@@ -123,6 +123,18 @@ def _estimated_range_m(
                 avg_snr = float(snr_str)
             except Exception:
                 pass
+        if "rssi=" in notes:
+            try:
+                rssi_str = notes.split("rssi=")[1].split("dBm")[0]
+                avg_rssi = float(rssi_str)
+            except Exception:
+                pass
+        if "freq=" in notes:
+            try:
+                freq_str = notes.split("freq=")[1].split("MHz")[0]
+                freq_mhz = float(freq_str)
+            except Exception:
+                pass
         if "range≈" in notes:
             # Already computed by signal_detector; extract it
             try:

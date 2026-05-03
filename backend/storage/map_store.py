@@ -186,6 +186,26 @@ def get_all_features(kind: str | None = None, limit: int = 2000) -> dict[str, An
     return features_in_bounds(-90, 90, -180, 180, kind=kind, limit=limit)
 
 
+def get_feature_by_id(feature_id: str) -> dict[str, Any] | None:
+    """O(1) lookup of a single feature by primary key."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM features WHERE id = ?", (feature_id,)
+        ).fetchone()
+    if not row:
+        return None
+    props = json.loads(row["properties_json"])
+    props["id"] = row["id"]
+    props["kind"] = row["kind"]
+    props["confidence"] = row["confidence"]
+    props["analysis_count"] = row["analysis_count"]
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [row["lon"], row["lat"]]},
+        "properties": props,
+    }
+
+
 def upsert_tile(tile_id: str, lat_min: float, lon_min: float,
                 lat_max: float, lon_max: float, status: str = "unanalyzed",
                 feature_count: int = 0) -> None:
