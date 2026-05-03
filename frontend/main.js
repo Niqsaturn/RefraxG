@@ -227,17 +227,36 @@ async function refreshSystemStatus() {
 }
 
 // ── Model Dropdown ─────────────────────────────────────────────────────────
+function _modelLabel(entry) {
+  if (entry.display) return entry.display;
+  const backend = entry.backend || '';
+  const name = entry.name || '';
+  if (backend === 'llama_cpp') return `llama.cpp: ${name}`;
+  if (backend === 'transformers') return `HuggingFace: ${name}`;
+  if (backend === 'python_triangulation') return 'Triangulation Baseline (built-in)';
+  return `Local: ${name}`;
+}
+
 async function populateModelDropdown() {
   if (!modelDropdown) return;
   try {
     const data = await fetch('/api/models/discover').then((r) => r.json());
-    const options = [['', '- None -']];
+    const options = [['', '— None —']];
     (data.ollama || []).forEach((m) => options.push([`ollama/${m}`, `Ollama: ${m}`]));
-    (data.python_local || []).forEach((m) => options.push([`python_local/${m}`, `Local: ${m}`]));
+    const detailed = data.python_local_detailed || [];
+    if (detailed.length > 0) {
+      detailed.forEach((entry) => {
+        const label = _modelLabel(entry);
+        options.push([`python_local/${entry.name}`, label]);
+      });
+    } else {
+      // fallback to plain list if detailed not present
+      (data.python_local || []).forEach((m) => options.push([`python_local/${m}`, `Local: ${m}`]));
+    }
     modelDropdown.innerHTML = options.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
     if (selectedModel) modelDropdown.value = selectedModel;
   } catch (_) {
-    if (modelDropdown) modelDropdown.innerHTML = '<option value="">- unavailable -</option>';
+    if (modelDropdown) modelDropdown.innerHTML = '<option value="">— unavailable —</option>';
   }
 }
 
