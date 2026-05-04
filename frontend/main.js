@@ -1,25 +1,56 @@
-const _DARK_STYLE = {
-  version: 8,
-  name: 'dark',
-  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-  sources: {
-    'osm-tiles': {
-      type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      attribution: '© OpenStreetMap contributors',
-    },
+const MAP_PROVIDER_CONFIG = {
+  provider: {
+    name: window.ANTENNAMAP_MAP_PROVIDER_NAME || 'osm',
+    token: window.ANTENNAMAP_MAP_PROVIDER_TOKEN || '',
+    styleBaseUrl: window.ANTENNAMAP_MAP_PROVIDER_STYLE_BASE_URL || '',
   },
-  layers: [
-    // Keep schema-safe base ordering: background first, then raster/vector layers only.
-    { id: 'background', type: 'background', paint: { 'background-color': '#0f172a' } },
-    { id: 'osm', type: 'raster', source: 'osm-tiles', paint: { 'raster-opacity': 0.55, 'raster-saturation': -0.7, 'raster-brightness-min': 0.05 } },
-  ],
+  defaultMode: 'dark',
+  storageKey: 'antennamap.basemap.mode',
 };
+
+const BASEMAP_DEFS = {
+  dark: {
+    osm: { tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap contributors', paint: { 'raster-opacity': 0.55, 'raster-saturation': -0.7, 'raster-brightness-min': 0.05 } },
+    provider: { stylePath: 'dark', fallbackToOsm: true },
+  },
+  streets: {
+    osm: { tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap contributors' },
+    provider: { stylePath: 'streets', fallbackToOsm: true },
+  },
+  satellite: {
+    osm: { tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap contributors', paint: { 'raster-opacity': 0.6, 'raster-saturation': -0.6 } },
+    provider: { stylePath: 'satellite', fallbackToOsm: true },
+  },
+};
+
+function _getProviderStyleUrl(mode) {
+  const { token, styleBaseUrl } = MAP_PROVIDER_CONFIG.provider;
+  const stylePath = BASEMAP_DEFS[mode]?.provider?.stylePath;
+  if (!token || !styleBaseUrl || !stylePath) return null;
+  return `${styleBaseUrl.replace(/\/$/, '')}/${stylePath}?token=${encodeURIComponent(token)}`;
+}
+
+function _buildRasterStyle(mode) {
+  const def = BASEMAP_DEFS[mode] || BASEMAP_DEFS[MAP_PROVIDER_CONFIG.defaultMode];
+  return {
+    version: 8,
+    name: `basemap-${mode}`,
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    sources: { basemap: { type: 'raster', tiles: def.osm.tiles, tileSize: def.osm.tileSize, attribution: def.osm.attribution } },
+    layers: [
+      { id: 'background', type: 'background', paint: { 'background-color': '#0f172a' } },
+      { id: 'basemap', type: 'raster', source: 'basemap', paint: def.osm.paint || {} },
+    ],
+  };
+}
+
+function _resolveMapStyle(mode) {
+  return _getProviderStyleUrl(mode) || _buildRasterStyle(mode);
+}
 
 const map = new maplibregl.Map({
   container: 'map',
-  style: _DARK_STYLE,
+  style: _resolveMapStyle(currentBasemapMode()),
   projection: { type: 'globe' },
   center: [0, 20], zoom: 1.8, pitch: 0, bearing: 0, antialias: true,
 });
@@ -68,6 +99,7 @@ const sectorToggle    = document.getElementById('sectorToggle');
 const confidenceToggle= document.getElementById('confidenceToggle');
 const rangeBandToggle = document.getElementById('rangeBandToggle');
 const coverageToggle  = document.getElementById('coverageToggle');
+const basemapModeSelect = document.getElementById('basemapMode');
 const satelliteToggle = document.getElementById('satelliteToggle');
 const bayesToggle     = document.getElementById('bayesToggle');
 const timeRange       = document.getElementById('timeRange');
@@ -88,9 +120,30 @@ const logHeader       = document.getElementById('analysisLogHeader');
 const goToLatLon      = document.getElementById('goToLatLon');
 const goToBtn         = document.getElementById('goToBtn');
 
+if (basemapModeSelect) {
+  basemapModeSelect.value = currentBasemapMode();
+  basemapModeSelect.addEventListener('change', () => setBasemapMode(basemapModeSelect.value));
+}
+
 let sortedTimes = [];
 let sourcesInitialized = false;
 let selectedModel = '';
+function currentBasemapMode() {
+  try {
+    const m = localStorage.getItem(MAP_PROVIDER_CONFIG.storageKey);
+    return BASEMAP_DEFS[m] ? m : MAP_PROVIDER_CONFIG.defaultMode;
+  } catch (_) {
+    return MAP_PROVIDER_CONFIG.defaultMode;
+  }
+}
+
+function setBasemapMode(mode) {
+  const previousMode = currentBasemapMode();
+  const safeMode = BASEMAP_DEFS[mode] ? mode : MAP_PROVIDER_CONFIG.defaultMode;
+  try { localStorage.setItem(MAP_PROVIDER_CONFIG.storageKey, safeMode); } catch (_) {}
+  if (basemapModeSelect) basemapModeSelect.value = safeMode;
+  if (safeMode !== previousMode) window.location.reload();
+}
 const health = {
   lastFeatureFetchOkAt: null,
   counts: { infrastructure: 0, estimate: 0, speculative: 0, fox_targets: 0 },
@@ -114,7 +167,7 @@ function _addBearingArrowIcon() {
 function _hasValidGlyphs() {
   try {
     const styleGlyphs = map.getStyle && map.getStyle()?.glyphs;
-    const configuredGlyphs = _DARK_STYLE?.glyphs;
+    const configuredGlyphs = _buildRasterStyle('dark')?.glyphs;
     const glyphs = styleGlyphs || configuredGlyphs;
     return typeof glyphs === 'string' && glyphs.includes('{fontstack}') && glyphs.includes('{range}');
   } catch (_) {

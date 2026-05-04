@@ -58,3 +58,35 @@ For full rendering, clients must be able to reach those domains over HTTPS (TCP 
 2. Host a local style JSON plus vector/raster tiles (for example from MBTiles via a local tile server such as `tileserver-gl` or equivalent).
 3. Update `frontend/main.js` `MAP_STYLES.primary` to the local style URL (example: `http://localhost:8080/styles/basic/style.json`) and keep an internal backup URL.
 4. Optionally pre-cache the style, sprites, glyphs, and tile responses with a service worker for disconnected operation.
+
+## Basemap provider configuration (frontend)
+
+The frontend supports selectable basemap modes with persisted UI state:
+- `dark`
+- `streets`
+- `satellite`
+
+By default, all modes fall back to OpenStreetMap raster tiles.
+
+Optional token-based provider support can be enabled by defining global values before `frontend/main.js` loads:
+
+```html
+<script>
+  window.ANTENNAMAP_MAP_PROVIDER_NAME = 'example-vector-provider';
+  window.ANTENNAMAP_MAP_PROVIDER_STYLE_BASE_URL = 'https://maps.example.com/styles';
+  window.ANTENNAMAP_MAP_PROVIDER_TOKEN = 'YOUR_TOKEN';
+</script>
+```
+
+When `ANTENNAMAP_MAP_PROVIDER_STYLE_BASE_URL` and `ANTENNAMAP_MAP_PROVIDER_TOKEN` are both present, AntennaMAP resolves style URLs as:
+- `{STYLE_BASE_URL}/dark?token=...`
+- `{STYLE_BASE_URL}/streets?token=...`
+- `{STYLE_BASE_URL}/satellite?token=...`
+
+If token/config is missing, the app automatically uses OSM raster fallback.
+
+### Licensing and attribution constraints
+
+- OSM tile usage must comply with OpenStreetMap tile usage policy and attribution requirements.
+- Third-party vector/satellite providers require their own valid API token, billing plan, and attribution text per provider terms.
+- Not all providers permit satellite imagery, offline caching, or high-volume tile redistribution under standard plans; verify provider license terms before production deployment.
