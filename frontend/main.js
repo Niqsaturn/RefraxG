@@ -894,7 +894,7 @@ map.on('load', async () => {
   setInterval(refreshUncertain, 60000);
   // Refresh propagation layers every 90 s (they depend on feature store contents)
   setInterval(() => { if (propagationToggle?.checked) _loadPropagationFootprints(); }, 90000);
-  setInterval(() => { if (interferenceToggle?.checked) _loadInterferenceZones(); }, 90000);
+  setInterval(() => { if (interferenceToggle?.checked) { _loadInterferenceZones(); _refreshInterferenceEstimates(); } }, 90000);
   setInterval(() => { if (vlfElfToggle?.checked) _loadVlfElfEmitters(); }, 90000);
 
   // ── Fox hunt / waterfall / SSE initialization ─────────────────────────────
@@ -1122,6 +1122,9 @@ function _addFoxSources() {
   map.addSource('beam-patterns',         { type: 'geojson', data: empty });
   map.addSource('propagation-footprints',{ type: 'geojson', data: empty });
   map.addSource('interference-zones',    { type: 'geojson', data: empty });
+  map.addSource('interference-sources',    { type: 'geojson', data: empty });
+  map.addSource('interference-rays',       { type: 'geojson', data: empty });
+  map.addSource('interference-uncertainty',{ type: 'geojson', data: empty });
   map.addSource('vlf-elf-emitters',      { type: 'geojson', data: empty });
 
   // Bayesian posterior heatmap (rendered below fox layers)
@@ -1189,6 +1192,17 @@ function _addFoxSources() {
       'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 1, 60, 8, 20],
       'heatmap-opacity': 0.75,
     } });
+
+
+  map.addLayer({ id: 'interference-source-points', type: 'circle', source: 'interference-sources',
+    layout: { visibility: 'none' },
+    paint: { 'circle-radius': 7, 'circle-color': '#f97316', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 } });
+  map.addLayer({ id: 'interference-rays', type: 'line', source: 'interference-rays',
+    layout: { visibility: 'none' },
+    paint: { 'line-color': '#fb923c', 'line-width': 2, 'line-opacity': 0.6 } });
+  map.addLayer({ id: 'interference-uncertainty', type: 'fill', source: 'interference-uncertainty',
+    layout: { visibility: 'none' },
+    paint: { 'fill-color': '#f97316', 'fill-opacity': 0.18, 'fill-outline-color': '#fdba74' } });
 
   // ── VLF / ELF / UWB emitter markers ─────────────────────────────────────
   map.addLayer({ id: 'vlf-elf-layer', type: 'circle', source: 'vlf-elf-emitters',
@@ -1708,7 +1722,8 @@ skipZoneToggle?.addEventListener('change', () => {
 interferenceToggle?.addEventListener('change', () => {
   const vis = interferenceToggle.checked ? 'visible' : 'none';
   try { map.setLayoutProperty('interference-heatmap', 'visibility', vis); } catch {}
-  if (interferenceToggle.checked) _loadInterferenceZones();
+  ['interference-source-points','interference-rays','interference-uncertainty'].forEach((id)=>{ try { map.setLayoutProperty(id,'visibility',vis);} catch {} });
+  if (interferenceToggle.checked) { _loadInterferenceZones(); _refreshInterferenceEstimates(); }
 });
 
 vlfElfToggle?.addEventListener('change', () => {
@@ -1753,6 +1768,21 @@ async function _loadVlfElfEmitters() {
     const src = map.getSource('vlf-elf-emitters');
     if (src) src.setData(data);
   } catch {}
+}
+
+
+async function _refreshInterferenceEstimates() {
+  try {
+    const srcPts = map.getSource('interference-sources');
+    const srcUnc = map.getSource('interference-uncertainty');
+    const srcRays = map.getSource('interference-rays');
+    if (!srcPts || !srcUnc || !srcRays) return;
+    const pts = await fetch('/api/map/features?kind=interference_source&limit=300').then((r)=>r.json());
+    const unc = await fetch('/api/map/features?kind=interference_uncertainty&limit=300').then((r)=>r.json());
+    srcPts.setData(pts);
+    srcUnc.setData(unc);
+    srcRays.setData({type:'FeatureCollection',features:[]});
+  } catch (_) {}
 }
 
 async function refreshBayesField() {

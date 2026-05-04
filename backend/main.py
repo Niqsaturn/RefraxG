@@ -94,7 +94,7 @@ from backend.storage.map_store import (
     get_calibration_stats,
     record_position_error,
 )
-from backend.analysis.waterfall_analyzer import analyze_psd
+from backend.analysis.waterfall_analyzer import analyze_psd, associate_anomalies_to_bearings
 from backend.analysis.range_estimator import estimate_range_km
 from backend.analysis.bearing_tracker import estimate_bearing as estimate_bearing_track
 from backend.analysis.kalman_tracker import PositionKalman
@@ -660,6 +660,22 @@ def _run_analysis_cycle(cfg: dict) -> None:
         logger.warning("detect_signals error (provider=%s): %s", model_config["provider"], result.error)
     metrics["cycle_phase"] = "detected"
     corrected_detections, correction_audit, correction_stats = _apply_ai_correction_loop(result.detections, samples)
+    anomaly_obs = associate_anomalies_to_bearings([d for d in corrected_detections if d.get("confidence", 0) >= 0.6], samples)
+    if anomaly_obs and op_lat and op_lon:
+        try:
+            from backend.analysis.bayes_field import get_or_create_grid, BearingUpdate
+            grid = get_or_create_grid(float(op_lat), float(op_lon), radius_km=50.0, resolution_km=2.0)
+            for obs in anomaly_obs:
+                best = next((x for x in samples if (x.get("bearing_deg") is not None or x.get("heading_deg") is not None) and x.get("lat") is not None and x.get("lon") is not None), None)
+                if not best:
+                    continue
+                grid.update_bearing(BearingUpdate(obs_lat=float(best["lat"]), obs_lon=float(best["lon"]), bearing_deg=obs.bearing_deg, sigma_deg=obs.sigma_deg))
+            post = grid.posterior_geojson(top_k=120)
+            peak = post.get("properties", {})
+            if peak.get("peak_lat") is not None:
+                result.detections.append({"id": "interference-source", "label": "Interference Source", "confidence": 0.75, "freq_band": "unknown", "lat": peak.get("peak_lat"), "lon": peak.get("peak_lon"), "uncertainty_m": 2500.0})
+        except Exception:
+            pass
     metrics["candidates"] = len(result.detections)
     result.detections = corrected_detections
     metrics["detections"] = len(result.detections)
@@ -697,6 +713,20 @@ def _run_analysis_cycle(cfg: dict) -> None:
                     ]
                     props["position_source"] = "triangulation_wls"
                     props["triangulation_quality"] = round(triangulation_anchor["quality_score"], 3)
+
+        # Dedicated interference source layers: point + uncertainty polygon + confidence contour + bearing rays
+        interference_features = []
+        for d in result.detections:
+            if d.get("label") != "Interference Source":
+                continue
+            lat = float(d.get("lat", op_lat)); lon = float(d.get("lon", op_lon)); unc_m = float(d.get("uncertainty_m", 2500.0))
+            interference_features.append({"type":"Feature","geometry":{"type":"Point","coordinates":[lon,lat]},"properties":{"id":f"ifsrc-{lat:.5f}-{lon:.5f}","kind":"interference_source","confidence":float(d.get("confidence",0.7)),"uncertainty_m":unc_m}})
+            deg_lat = unc_m/111320.0
+            deg_lon = unc_m/(111320.0*max(math.cos(math.radians(lat)),1e-6))
+            ring=[[lon+deg_lon*math.cos(t), lat+deg_lat*math.sin(t)] for t in [i*math.pi/18 for i in range(37)]]
+            interference_features.append({"type":"Feature","geometry":{"type":"Polygon","coordinates":[ring]},"properties":{"id":f"ifunc-{lat:.5f}-{lon:.5f}","kind":"interference_uncertainty","confidence":float(d.get("confidence",0.7))}})
+            interference_features.append({"type":"Feature","geometry":{"type":"Polygon","coordinates":[ring]},"properties":{"id":f"ifcont-{lat:.5f}-{lon:.5f}","kind":"interference_contour","confidence":float(d.get("confidence",0.7))}})
+        speculative.extend(interference_features)
 
         for feat in speculative:
             try:
@@ -1036,7 +1066,7 @@ def loop_status() -> dict:
 # ── Features ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/features")
-def get_features(kind: str | None = Query(default=None, pattern="^(infrastructure|estimate|speculative|confirmed)?$"), timestamp_lte: str | None = None) -> dict:
+def get_features(kind: str | None = Query(default=None, pattern="^(infrastructure|estimate|speculative|confirmed|interference_source|interference_uncertainty|interference_ray|interference_contour)?$"), timestamp_lte: str | None = None) -> dict:
     data = get_all_features(limit=5000)
     db_features = data.get("features", [])
     # Merge static GeoJSON features that haven't been migrated to SQLite yet.
@@ -1385,6 +1415,22 @@ async def analysis_run(body: AnalysisRunRequest) -> dict:
 
     result = detect_signals(samples, model_config, fcc_context, examples_text, op_lat, op_lon)
     corrected_detections, correction_audit, correction_stats = _apply_ai_correction_loop(result.detections, samples)
+    anomaly_obs = associate_anomalies_to_bearings([d for d in corrected_detections if d.get("confidence", 0) >= 0.6], samples)
+    if anomaly_obs and op_lat and op_lon:
+        try:
+            from backend.analysis.bayes_field import get_or_create_grid, BearingUpdate
+            grid = get_or_create_grid(float(op_lat), float(op_lon), radius_km=50.0, resolution_km=2.0)
+            for obs in anomaly_obs:
+                best = next((x for x in samples if (x.get("bearing_deg") is not None or x.get("heading_deg") is not None) and x.get("lat") is not None and x.get("lon") is not None), None)
+                if not best:
+                    continue
+                grid.update_bearing(BearingUpdate(obs_lat=float(best["lat"]), obs_lon=float(best["lon"]), bearing_deg=obs.bearing_deg, sigma_deg=obs.sigma_deg))
+            post = grid.posterior_geojson(top_k=120)
+            peak = post.get("properties", {})
+            if peak.get("peak_lat") is not None:
+                result.detections.append({"id": "interference-source", "label": "Interference Source", "confidence": 0.75, "freq_band": "unknown", "lat": peak.get("peak_lat"), "lon": peak.get("peak_lon"), "uncertainty_m": 2500.0})
+        except Exception:
+            pass
     result.detections = corrected_detections
 
     speculative_features = []
