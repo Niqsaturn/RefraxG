@@ -350,6 +350,48 @@ async function applyModelSelection(value) {
 }
 
 
+
+
+async function waitForMapStoreMigrationReadiness(options = {}) {
+  const timeoutMs = options.timeoutMs ?? 6000;
+  const pollMs = options.pollMs ?? 500;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const healthResp = await fetch('/api/health');
+      if (healthResp.ok) {
+        const health = await healthResp.json();
+        if (health.map_store_migration_ready) return health;
+      }
+    } catch (_) {}
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return null;
+}
+
+async function ensureMapDataLoadedAfterMigration() {
+  if (details) details.textContent = 'Loading map data…';
+  const ready = await waitForMapStoreMigrationReadiness({ timeoutMs: 7000, pollMs: 500 });
+  if (ready?.map_store_migration_ready) {
+    if (details) details.textContent = ready.migration_error
+      ? `Map data loaded with migration warning: ${ready.migration_error}`
+      : 'Map data loaded.';
+    return ready;
+  }
+  if (details) details.textContent = 'Loading map data… continuing with partial data; refreshing shortly.';
+  const intervalId = setInterval(async () => {
+    const next = await waitForMapStoreMigrationReadiness({ timeoutMs: 1200, pollMs: 400 });
+    if (next?.map_store_migration_ready) {
+      clearInterval(intervalId);
+      await _deterministicFeatureRefreshSequence();
+      if (details) details.textContent = next.migration_error
+        ? `Map data refreshed after migration warning: ${next.migration_error}`
+        : 'Map data refreshed after startup migration.';
+    }
+  }, 1500);
+  return null;
+}
+
 async function _deterministicFeatureRefreshSequence() {
   await refreshSource();
   await refreshSpeculative();
@@ -629,6 +671,8 @@ map.on('load', async () => {
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
   map.addControl(new maplibregl.FullscreenControl(), 'top-right');
   setupGoToLatLon();
+
+  await ensureMapDataLoadedAfterMigration();
 
   // Seed GeoJSON features from API
   const seed = await fetch('/api/features').then((r) => r.json()).catch(() => ({ features: [] }));
