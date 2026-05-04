@@ -873,6 +873,9 @@ def discover_available_models() -> dict[str, Any]:
         "python_local": [m["name"] for m in py_models],
         "python_local_detailed": py_models,
         "searched_paths": discovery.get("searched_paths", []),
+        "search_roots": discovery.get("search_roots", []),
+        "env_cache_paths": discovery.get("env_cache_paths", []),
+        "hf_cache_paths": discovery.get("hf_cache_paths", []),
         "source_counts": discovery.get("source_counts", {}),
         "discovery_sources": discovery.get("discovery_sources", {}),
         "runnable_count": sum(1 for m in py_models if m.get("importable") == "true" and (m.get("path") or m.get("model_id") or m.get("adapter") in ("triangulation", "generic"))),
@@ -978,6 +981,9 @@ def status() -> dict:
         "status": "ok",
         "service": "antennamap",
         "sdr_events": event_bus.sdr_stats(),
+        "map_store_migration_ready": _migration_readiness["ready"],
+        "migrated_count": _migration_readiness["migrated_count"],
+        "migration_error": _migration_readiness["error"],
     }
 
 

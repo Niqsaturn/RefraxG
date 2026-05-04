@@ -63,6 +63,19 @@ _RUNNABLE_ADAPTERS: set[str] = {
     "triangulation",
 }
 
+_INFERENCE_DISPATCHABLE_ADAPTERS: set[str] = {
+    "llama_cpp",
+    "gpt4all",
+    "transformers",
+    "qwen",
+    "ctransformers",
+    "mlx_lm",
+    "ollama_py",
+    "openllm",
+    "generic",
+    "custom",
+}
+
 # ---------------------------------------------------------------------------
 # Package scanning
 # ---------------------------------------------------------------------------
@@ -186,7 +199,14 @@ def validate_discovered_adapters(models: list[dict[str, str]] | None = None) -> 
     models = models if models is not None else discover_models_detailed()
     mismatches: list[tuple[str, str]] = []
     for model in models:
-        if _normalize_adapter_key(model.get("adapter", "custom")) not in _RUNNABLE_ADAPTERS:
+        adapter = _normalize_adapter_key(model.get("adapter", "custom"))
+        importable = model.get("importable", "false") == "true"
+        reason = (model.get("reason_unusable", "") or "").strip()
+        dispatchable = adapter in _INFERENCE_DISPATCHABLE_ADAPTERS
+        if adapter not in _RUNNABLE_ADAPTERS:
+            mismatches.append((model.get("name", ""), model.get("adapter", "")))
+            continue
+        if importable and (not dispatchable) and not reason:
             mismatches.append((model.get("name", ""), model.get("adapter", "")))
     if mismatches:
         _log.warning("Discovered adapter keys are not runnable: %s", mismatches)
@@ -212,6 +232,9 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
     if adapter_reason:
         normalized["importable"] = "false"
         normalized["reason_unusable"] = adapter_reason
+    if normalized.get("importable") == "true" and adapter not in _INFERENCE_DISPATCHABLE_ADAPTERS:
+        normalized["importable"] = "false"
+        normalized["reason_unusable"] = f"non_dispatchable_adapter:{adapter}"
     has_locator = bool(normalized.get("path") or normalized.get("model_id"))
     if normalized.get("adapter") in ("triangulation", "generic") and not has_locator:
         has_locator = True
@@ -393,6 +416,9 @@ def discover_models_with_metadata() -> dict[str, Any]:
     return {
         "models": unique,
         "searched_paths": searched_paths,
+        "search_roots": [str(p) for p in search_roots],
+        "env_cache_paths": [str(p) for p in _env_cache_roots()],
+        "hf_cache_paths": [str(p) for p in _hf_cache_roots()],
         "source_counts": sources,
         "discovery_sources": diagnostics,
     }
@@ -407,6 +433,7 @@ def discover_python_local_models() -> list[str]:
 # ---------------------------------------------------------------------------
 
 _MODEL_EXTENSIONS = (".gguf", ".bin", ".safetensors")
+_METADATA_FILENAMES = {"config.json", "tokenizer.json", "tokenizer_config.json", "adapter_config.json"}
 
 
 def _configured_search_roots() -> list[Path]:
@@ -440,6 +467,7 @@ def _find_model_files(search_roots: list[Path]) -> list[dict[str, str]]:
     found = []
     seen: set[str] = set()
     llama_available = _module_available("llama_cpp")
+    transformers_available = _module_available("transformers")
     for d in search_roots:
         if not d.exists():
             continue
@@ -462,7 +490,41 @@ def _find_model_files(search_roots: list[Path]) -> list[dict[str, str]]:
                 "importable": "true" if runtime_available else "false",
                 "reason_unusable": reason,
             })
+
+        for meta_dir in _find_metadata_model_dirs(d):
+            meta_key = str(meta_dir)
+            if meta_key in seen:
+                continue
+            seen.add(meta_key)
+            model_id = _infer_model_id_from_path(meta_dir)
+            found.append({
+                "name": f"meta:{model_id}",
+                "path": str(meta_dir),
+                "model_id": model_id,
+                "adapter": "transformers",
+                "display": f"Metadata model: {meta_dir.name}",
+                "importable": "true" if transformers_available else "false",
+                "reason_unusable": "" if transformers_available else "transformers_not_importable",
+                "detector": "metadata_scan",
+            })
     return found
+
+
+def _find_metadata_model_dirs(root: Path) -> list[Path]:
+    dirs: list[Path] = []
+    for marker in _METADATA_FILENAMES:
+        for marker_path in root.rglob(marker):
+            parent = marker_path.parent
+            if parent not in dirs:
+                dirs.append(parent)
+    return dirs
+
+
+def _infer_model_id_from_path(path: Path) -> str:
+    name = path.name
+    if name.startswith("models--"):
+        return name.removeprefix("models--").replace("--", "/")
+    return name
 
 
 def _find_hf_cache() -> list[dict[str, str]]:
