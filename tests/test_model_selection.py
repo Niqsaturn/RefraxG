@@ -91,3 +91,46 @@ def test_discovered_record_schema_stable(monkeypatch, tmp_path):
     for record in payload["models"]:
         assert required.issubset(set(record.keys()))
         assert record["importable"] in {"true", "false"}
+
+
+def test_map_windows_script_findings_to_normalized(monkeypatch):
+    monkeypatch.setattr(py_local, "_module_available", lambda m: m in {"llama_cpp", "transformers"})
+    payload = {
+        "findings": [
+            {"name": "m1", "path": "C:/models/m1.gguf", "kind": "gguf", "confidence": 0.9, "detector": "extension_scan", "details": {}},
+            {"name": "org/demo", "path": "C:/hf/models--org--demo", "kind": "metadata_dir", "confidence": 0.8, "detector": "metadata_scan", "details": {}},
+        ]
+    }
+    out = py_local._map_windows_script_findings(payload)
+    assert out[0]["adapter"] == "llama_cpp"
+    assert out[0]["importable"] == "true"
+    assert out[1]["adapter"] == "transformers"
+
+
+def test_merge_models_dedup_prefers_first_runnable():
+    merged = py_local._merge_models_preserve_first_runnable([
+        {"name": "a", "path": "/x.gguf", "adapter": "llama_cpp", "importable": "false", "reason_unusable": "llama_cpp_not_importable"},
+        {"name": "a", "path": "/x.gguf", "adapter": "llama_cpp", "importable": "true"},
+        {"name": "b", "path": "/y.gguf", "adapter": "llama_cpp", "importable": "true"},
+    ])
+    assert len(merged) == 2
+    assert merged[0]["importable"] == "true"
+
+
+def test_windows_script_timeout_failure_does_not_crash(monkeypatch):
+    monkeypatch.setenv("ANTENNAMAP_DISCOVERY_USE_POWERSHELL", "1")
+    monkeypatch.setattr(py_local.platform, "system", lambda: "Windows")
+
+    class DummyTimeout:
+        def __call__(self, *args, **kwargs):
+            raise py_local.subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    monkeypatch.setattr(py_local.subprocess, "run", DummyTimeout())
+    monkeypatch.setattr(py_local, "_load_registry", lambda: [])
+    monkeypatch.setattr(py_local, "scan_installed_llm_packages", lambda: [])
+    monkeypatch.setattr(py_local, "_find_model_files", lambda roots: [])
+    monkeypatch.setattr(py_local, "_find_hf_cache", lambda: [])
+    monkeypatch.setattr(py_local, "_find_triangulation_model", lambda: None)
+    payload = py_local.discover_models_with_metadata()
+    assert payload["models"] == []
+    assert payload["discovery_sources"]["windows_powershell"]["error"] == "timeout"
