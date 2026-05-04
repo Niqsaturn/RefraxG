@@ -66,6 +66,21 @@ def _extract_emitters(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return emitters
 
 
+
+
+def classify_interference_hypothesis(anomaly_props: dict[str, Any]) -> tuple[str, float]:
+    """Rule-based source hypothesis from control correlation markers."""
+    ctrl_corr = float(anomaly_props.get("array_control_correlation", 0.0) or 0.0)
+    steering = bool(anomaly_props.get("steering_state_changed", False))
+    power = bool(anomaly_props.get("power_state_changed", False))
+    external = float(anomaly_props.get("external_motion_score", 0.0) or 0.0)
+
+    if ctrl_corr >= 0.55 and (steering or power):
+        return "self_generated_likely", round(min(0.99, 0.6 + ctrl_corr * 0.35), 4)
+    if ctrl_corr <= 0.25 and external >= 0.35:
+        return "external_interferer_likely", round(min(0.99, 0.55 + external * 0.4), 4)
+    return "uncertain", 0.5
+
 def compute_interference_zones(
     features: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -144,12 +159,54 @@ def compute_interference_zones(
                     "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [pt_lon, pt_lat]},
                     "properties": {
+                        "kind": "interference",
+                        "interference_type": "cochannel_coherent",
+                        "confidence": round(min(0.99, 0.45 + min(abs(1.0 - ratio), 1.0) * 0.4), 4),
                         "interference_ratio": round(min(ratio, 2.0), 4),
                         "field_strength_dbvm": round(field_db, 2),
                         "freq_hz": round(freq_hz),
+                        "freq_center_hz": round(freq_hz),
+                        "bandwidth_hz": _CO_CHANNEL_HZ * 2,
+                        "time_span": "instantaneous",
+                        "source_hypothesis": "external_interferer_likely",
                         "source_a": emitter_a["id"],
                         "source_b": emitter_b["id"],
                     },
                 })
 
     return points
+
+
+def persist_interference_events(events: list[dict[str, Any]]) -> int:
+    """Persist interference events as map features and emit SSE updates."""
+    if not events:
+        return 0
+    try:
+        from backend.storage.map_store import upsert_feature
+        from backend.foxhunt.auto_loop import event_bus
+        from datetime import datetime, timezone
+    except Exception:
+        return 0
+
+    written = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for idx, feat in enumerate(events):
+        props = feat.get("properties", {}) or {}
+        kind = props.get("kind", "interference")
+        if kind != "interference":
+            continue
+        fid = props.get("id") or f"interference_{now}_{idx}"
+        feature = {
+            "type": "Feature",
+            "geometry": feat.get("geometry", {}),
+            "properties": {
+                **props,
+                "id": fid,
+                "kind": "interference",
+                "updated_at": now,
+            },
+        }
+        upsert_feature(feature)
+        event_bus.publish({"type": "interference_event", "ts": now, "feature": feature})
+        written += 1
+    return written

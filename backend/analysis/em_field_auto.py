@@ -164,3 +164,19 @@ def _publish_em_event(feature_id: str, geometry: dict) -> None:
         })
     except Exception:
         pass
+
+
+def classify_interference_hypothesis(anomaly: dict[str, Any]) -> tuple[str, float]:
+    """Classify likely source of interference from control correlation evidence."""
+    props = anomaly.get("properties", {}) or {}
+    ctrl_corr = float(props.get("array_control_correlation", 0.0) or 0.0)
+    steering_lock = bool(props.get("steering_state_changed", False))
+    power_lock = bool(props.get("power_state_changed", False))
+    external_motion = float(props.get("external_motion_score", 0.0) or 0.0)
+
+    if ctrl_corr >= 0.55 and (steering_lock or power_lock):
+        return ("self_generated_likely", round(min(0.99, 0.6 + ctrl_corr * 0.35), 4))
+    if ctrl_corr <= 0.25 and external_motion >= 0.35:
+        return ("external_interferer_likely", round(min(0.99, 0.55 + external_motion * 0.4), 4))
+    return ("uncertain", 0.5)
+

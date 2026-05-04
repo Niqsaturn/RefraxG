@@ -2241,6 +2241,18 @@ def propagation_footprints(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+
+
+@app.get("/api/interference/live")
+def interference_live(limit: int = Query(default=400, ge=1, le=2000)):
+    """Return latest persisted interference map features for live rendering."""
+    try:
+        from backend.storage.map_store import get_all_features
+        fc = get_all_features(kind="interference", limit=limit)
+        return fc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 @app.get("/api/propagation/interference")
 def propagation_interference(
     lat_min: float = Query(default=-90.0),
@@ -2264,6 +2276,11 @@ def propagation_interference(
             if f.get("geometry", {}).get("type") == "Point"
         ]
         points = compute_interference_zones(features)
+        try:
+            from backend.rf.interference_calculator import persist_interference_events
+            persist_interference_events(points)
+        except Exception:
+            pass
         return {"type": "FeatureCollection", "features": points}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
