@@ -909,7 +909,14 @@ def _telemetry_in_window(timestamp_lte: str | None) -> tuple[list[dict], datetim
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "service": "antennamap", **policy_status()}
+    return {
+        "status": "ok",
+        "service": "antennamap",
+        "map_store_migration_ready": _migration_readiness["ready"],
+        "migrated_count": _migration_readiness["migrated_count"],
+        "migration_error": _migration_readiness["error"],
+        **policy_status(),
+    }
 
 
 @app.get("/api/status")
@@ -1887,6 +1894,11 @@ from fastapi import Request as _Request
 from fastapi.responses import StreamingResponse as _StreamingResponse
 
 _app_loop: _asyncio.AbstractEventLoop | None = None
+_migration_readiness = {
+    "ready": False,
+    "migrated_count": 0,
+    "error": None,
+}
 
 
 @app.on_event("startup")
@@ -1953,17 +1965,27 @@ async def _migrate_geojson_to_map_store() -> None:
     Runs at startup so FCC/tower auto-seed and fox hunt confirmed features all
     appear together through /api/features (which now reads from SQLite only).
     """
+    _migration_readiness["ready"] = False
+    _migration_readiness["error"] = None
+    _migration_readiness["migrated_count"] = 0
     from backend.storage.map_store import get_feature_by_id
-    await _asyncio.sleep(2)
-    data = load_geojson()
-    migrated = 0
-    for f in data.get("features", []):
-        fid = f.get("properties", {}).get("id") or f.get("id", "")
-        if fid and get_feature_by_id(fid) is None:
-            upsert_feature(f)
-            migrated += 1
-    if migrated:
-        logger.info("migrated %d static GeoJSON features into map_store", migrated)
+    try:
+        await _asyncio.sleep(2)
+        data = load_geojson()
+        migrated = 0
+        for f in data.get("features", []):
+            fid = f.get("properties", {}).get("id") or f.get("id", "")
+            if fid and get_feature_by_id(fid) is None:
+                upsert_feature(f)
+                migrated += 1
+        _migration_readiness["migrated_count"] = migrated
+        if migrated:
+            logger.info("migrated %d static GeoJSON features into map_store", migrated)
+    except Exception as exc:
+        _migration_readiness["error"] = str(exc)
+        logger.exception("static GeoJSON migration to map_store failed")
+    finally:
+        _migration_readiness["ready"] = True
 
 
 async def _auto_seed_public_emitters() -> None:
