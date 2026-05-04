@@ -17,16 +17,6 @@ def test_models_discover_detailed_schema(monkeypatch):
     assert set(payload["python_local_detailed"][0].keys()) >= {"name", "display", "adapter", "importable"}
 
 
-def test_discover_models_normalizes_importable_locator(monkeypatch):
-    monkeypatch.setattr(py_local, "_load_registry", lambda: [{"name": "pkg-only", "display": "Pkg", "adapter": "generic", "importable": "true"}])
-    monkeypatch.setattr(py_local, "scan_installed_llm_packages", lambda: [])
-    monkeypatch.setattr(py_local, "_find_gguf_files", lambda: [])
-    monkeypatch.setattr(py_local, "_find_hf_cache", lambda: [])
-    monkeypatch.setattr(py_local, "_find_triangulation_model", lambda: None)
-    discovered = py_local.discover_models_detailed()
-    assert discovered[0]["model_id"] == "pkg-only"
-
-
 def test_run_inference_valid_model_hits_adapter(monkeypatch):
     monkeypatch.setattr(
         py_local,

@@ -153,9 +153,6 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
     if normalized["importable"] == "false" and not normalized.get("reason_unusable"):
         normalized["reason_unusable"] = "missing_runtime_requirements"
     has_locator = bool(normalized.get("path") or normalized.get("model_id"))
-    if not has_locator and normalized.get("importable") == "true":
-        normalized["model_id"] = normalized["name"]
-        has_locator = True
     if normalized.get("adapter") in ("triangulation", "generic") and not has_locator:
         has_locator = True
     if not has_locator and not normalized.get("reason_unusable"):
