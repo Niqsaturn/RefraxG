@@ -167,3 +167,32 @@ def test_merge_preserves_source_and_confidence_fields():
     assert merged[0]["importable"] == "true"
     assert merged[0]["source"] == "windows_powershell"
     assert merged[0]["confidence"] == "0.90"
+
+
+def test_config_loop_python_local_not_found_returns_structured_error(monkeypatch):
+    monkeypatch.setattr(py_local, "discover_models_detailed", lambda: [])
+    out = main.validate_python_local_model("python_local", "missing")
+    assert out is not None
+    assert out["error_code"] == "not_found"
+
+
+def test_config_loop_python_local_unusable_returns_structured_error(monkeypatch):
+    monkeypatch.setattr(
+        py_local,
+        "discover_models_detailed",
+        lambda: [{"name": "bad", "display": "Bad", "adapter": "llama_cpp", "importable": "false", "reason_unusable": "llama_cpp_not_importable"}],
+    )
+    out = main.validate_python_local_model("python_local", "bad")
+    assert out is not None
+    assert out["error_code"] == "unusable"
+
+
+def test_config_loop_python_local_unsupported_adapter_returns_structured_error(monkeypatch):
+    monkeypatch.setattr(
+        py_local,
+        "discover_models_detailed",
+        lambda: [{"name": "odd", "display": "Odd", "adapter": "mystery", "importable": "true", "path": "/tmp/m"}],
+    )
+    out = main.validate_python_local_model("python_local", "odd")
+    assert out is not None
+    assert out["error_code"] == "adapter_not_supported"

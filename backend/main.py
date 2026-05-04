@@ -321,6 +321,7 @@ class LoopManager:
         self._last_run_duration_ms: float | None = None
         self._provider_errors: list[dict] = []
         self._cycle_metrics: dict = {}
+        self._config_error: dict | None = None
 
     def _record_error(self, provider: str, operation: str, exc: Exception) -> None:
         self._provider_errors = [
@@ -386,7 +387,12 @@ class LoopManager:
     def update_config(self, interval_seconds: int, provider: str, model: str) -> dict:
         with self._lock:
             self._config = {"interval_seconds": interval_seconds, "provider": provider, "model": model}
+            self._config_error = None
             return self._config.copy()
+
+    def set_config_error(self, error: dict | None) -> None:
+        with self._lock:
+            self._config_error = error
 
     def config(self) -> dict:
         with self._lock:
@@ -405,6 +411,7 @@ class LoopManager:
                 },
                 "provider_errors": self._provider_errors,
                 "cycle_metrics": self._cycle_metrics,
+                "config_error": self._config_error,
             }
 
     def set_cycle_metrics(self, metrics: dict) -> None:
@@ -914,6 +921,24 @@ def run_inference(provider: str, model: str, payload: dict) -> dict:
     raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
 
+
+
+def validate_python_local_model(provider: str, model: str) -> dict[str, str] | None:
+    if provider != "python_local":
+        return None
+    from backend.model_providers.python_local import discover_models_detailed
+
+    entry = next((m for m in discover_models_detailed() if m.get("name") == model), None)
+    if entry is None:
+        return {"provider": provider, "model": model, "error_code": "not_found", "error": f"Model '{model}' not found"}
+    if entry.get("importable") != "true" or entry.get("reason_unusable"):
+        reason = entry.get("reason_unusable", "missing_runtime_requirements")
+        return {"provider": provider, "model": model, "error_code": "unusable", "error": f"Model '{model}' is unavailable: {reason}"}
+    if entry.get("adapter") not in {"triangulation", "llama_cpp", "gpt4all", "transformers", "qwen", "ctransformers", "mlx_lm", "ollama_py", "openllm", "generic", "custom"}:
+        adapter = entry.get("adapter", "unknown")
+        return {"provider": provider, "model": model, "error_code": "adapter_not_supported", "error": f"Model '{model}' adapter '{adapter}' is not supported"}
+    return None
+
 def _parse_timestamp(value: str) -> datetime | None:
     """Parse ISO timestamp string. Returns None for invalid/sentinel values."""
     if not value or value.lower() in ("undefined", "null", "none", ""):
@@ -968,6 +993,10 @@ def resume_loop() -> dict:
 
 @app.post("/api/loop/config")
 def config_loop(interval_seconds: int = 60, provider: str = "local", model: str = "baseline-v1") -> dict:
+    validation_error = validate_python_local_model(provider, model)
+    if validation_error is not None:
+        loop_manager.set_config_error(validation_error)
+        raise HTTPException(status_code=400, detail=validation_error)
     return {"config": loop_manager.update_config(interval_seconds, provider, model)}
 
 
