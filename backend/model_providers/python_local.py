@@ -211,6 +211,8 @@ def validate_discovered_adapters(models: list[dict[str, str]] | None = None) -> 
             continue
         if importable and (not dispatchable) and not reason:
             mismatches.append((model.get("name", ""), model.get("adapter", "")))
+        if reason and reason.startswith("unsupported_adapter:") and dispatchable:
+            mismatches.append((model.get("name", ""), model.get("adapter", "")))
     if mismatches:
         _log.warning("Discovered adapter keys are not runnable: %s", mismatches)
     return mismatches
@@ -228,23 +230,29 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
     normalized.setdefault("importable", "false")
     if normalized.get("importable") not in ("true", "false"):
         normalized["importable"] = "false"
-    if normalized["importable"] == "false" and not normalized.get("reason_unusable"):
-        normalized["reason_unusable"] = "missing_runtime_requirements"
+
     adapter, adapter_reason = _resolve_adapter(normalized)
     normalized["adapter"] = adapter
-    if adapter_reason:
-        normalized["importable"] = "false"
-        normalized["reason_unusable"] = adapter_reason
-    if normalized.get("importable") == "true" and adapter not in _INFERENCE_DISPATCHABLE_ADAPTERS:
-        normalized["importable"] = "false"
-        normalized["reason_unusable"] = f"non_dispatchable_adapter:{adapter}"
+
     has_locator = bool(normalized.get("path") or normalized.get("model_id"))
-    if normalized.get("adapter") in ("triangulation", "generic") and not has_locator:
-        has_locator = True
-    if not has_locator and not normalized.get("reason_unusable"):
+    normalized_support = adapter in _INFERENCE_DISPATCHABLE_ADAPTERS
+    importable = normalized.get("importable") == "true"
+    runnable = normalized_support and importable and has_locator
+
+    if adapter_reason:
+        runnable = False
+        normalized["reason_unusable"] = adapter_reason
+    elif not normalized_support:
+        normalized["reason_unusable"] = f"non_dispatchable_adapter:{adapter}"
+    elif not importable:
+        normalized["reason_unusable"] = normalized.get("reason_unusable") or "missing_runtime_requirements"
+    elif not has_locator:
         normalized["reason_unusable"] = "missing_locator"
-    if normalized.get("importable") == "true":
-        normalized["reason_unusable"] = ""
+
+    normalized["importable"] = "true" if runnable else "false"
+    if runnable:
+        normalized.pop("reason_unusable", None)
+
     if normalized.get("name") == BUNDLED_QWEN_NAME:
         normalized["is_bundled"] = "true"
         normalized["bundled_marker_present"] = "true" if BUNDLED_QWEN_MARKER.exists() else "false"
@@ -503,7 +511,11 @@ def _merge_models_preserve_first_runnable(models: list[dict[str, str]]) -> list[
         current = merged[existing_idx]
         current_runnable = current.get("importable") == "true" and not current.get("reason_unusable")
         incoming_runnable = normalized.get("importable") == "true" and not normalized.get("reason_unusable")
-        if (not current_runnable) and incoming_runnable:
+        current_bundled = current.get("name") == BUNDLED_QWEN_NAME
+        incoming_bundled = normalized.get("name") == BUNDLED_QWEN_NAME
+        if incoming_bundled and not current_bundled:
+            merged[existing_idx] = normalized
+        elif (not current_runnable) and incoming_runnable:
             merged[existing_idx] = normalized
         for key in stable_keys:
             key_to_idx[key] = existing_idx

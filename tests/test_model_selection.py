@@ -249,3 +249,17 @@ def test_discovery_exposes_search_root_metadata(monkeypatch, tmp_path):
     payload = py_local.discover_models_with_metadata()
     assert str(cache_root) in payload["env_cache_paths"]
     assert str(cache_root) in payload["search_roots"]
+
+
+def test_validate_python_local_model_returns_not_found(monkeypatch):
+    monkeypatch.setattr(py_local, "discover_models_detailed", lambda: [])
+    out = main.validate_python_local_model("python_local", "missing")
+    assert out is not None
+    assert out["error_code"] == "not_found"
+
+
+def test_validate_python_local_model_returns_unusable(monkeypatch):
+    monkeypatch.setattr(py_local, "discover_models_detailed", lambda: [{"name": "x", "importable": "false", "reason_unusable": "missing_runtime_requirements"}])
+    out = main.validate_python_local_model("python_local", "x")
+    assert out is not None
+    assert out["error_code"] == "unusable"

@@ -1010,6 +1010,8 @@ def health() -> dict:
 @app.get("/api/status")
 def status() -> dict:
     from backend.foxhunt.auto_loop import event_bus
+    cycle = loop_manager.status().get("cycle_metrics", {})
+    write_counts = cycle.get("feature_write_counts", {})
     return {
         "status": "ok",
         "service": "antennamap",
@@ -1017,7 +1019,12 @@ def status() -> dict:
         "map_store_migration_ready": _migration_readiness["ready"],
         "migrated_count": _migration_readiness["migrated_count"],
         "migration_error": _migration_readiness["error"],
-        "last_analysis_cycle_write": loop_manager.status().get("cycle_metrics", {}).get("feature_write_metrics_timestamp"),
+        "last_analysis_cycle_write": cycle.get("feature_write_metrics_timestamp"),
+        "analysis_write_metrics": {
+            "features_written": int(write_counts.get("detections", 0)) + int(write_counts.get("speculative", 0)) + int(write_counts.get("estimate", 0)),
+            "last_cycle_at": cycle.get("feature_write_metrics_timestamp"),
+            "write_errors": cycle.get("feature_write_error", ""),
+        },
     }
 
 
@@ -1052,6 +1059,12 @@ def loop_status() -> dict:
         "timestamp": cm.get("feature_write_metrics_timestamp"),
         "write_counts": cm.get("feature_write_counts", {}),
         "write_timestamps": cm.get("feature_write_timestamps", {}),
+    }
+    write_counts = cm.get("feature_write_counts", {})
+    status["analysis_write_metrics"] = {
+        "features_written": int(write_counts.get("detections", 0)) + int(write_counts.get("speculative", 0)) + int(write_counts.get("estimate", 0)),
+        "last_cycle_at": cm.get("feature_write_metrics_timestamp"),
+        "write_errors": cm.get("feature_write_error", ""),
     }
     return status
 

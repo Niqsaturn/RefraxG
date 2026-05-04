@@ -130,6 +130,8 @@ let sourcesInitialized = false;
 let selectedModel = '';
 const MODEL_STORAGE_KEY = 'antennamap.selectedModel';
 let _lastLoopMetrics = null;
+let _lastCycleRefreshStamp = '';
+
 function currentBasemapMode() {
   try {
     const m = localStorage.getItem(MAP_PROVIDER_CONFIG.storageKey);
@@ -283,6 +285,10 @@ async function refreshLoopStatus() {
         `<strong>AI corrections:</strong> applied ${m.ai_corrections_applied ?? 0} · rejected ${m.ai_corrections_rejected ?? 0}<br>` +
         `<strong>Map publish:</strong> ${m.map_publish_count ?? 0} · p50 ${m.map_publish_latency_ms_p50 ?? 0}ms · p95 ${m.map_publish_latency_ms_p95 ?? 0}ms`;
       if (_lastLoopMetrics?.timestamp) {
+        if (_lastCycleRefreshStamp !== _lastLoopMetrics.timestamp) {
+          _lastCycleRefreshStamp = _lastLoopMetrics.timestamp;
+          await _deterministicFeatureRefreshSequence();
+        }
         const writeCounts = _lastLoopMetrics.write_counts || {};
         const writeTimestamps = _lastLoopMetrics.write_timestamps || {};
         loopDebugStatus.innerHTML +=
