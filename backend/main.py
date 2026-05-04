@@ -840,6 +840,7 @@ def discover_available_models() -> dict[str, Any]:
         "python_local_detailed": py_models,
         "searched_paths": discovery.get("searched_paths", []),
         "source_counts": discovery.get("source_counts", {}),
+        "discovery_sources": discovery.get("discovery_sources", {}),
         "runnable_count": sum(1 for m in py_models if m.get("importable") == "true" and (m.get("path") or m.get("model_id") or m.get("adapter") in ("triangulation", "generic"))),
         "unusable_count": sum(1 for m in py_models if m.get("importable") != "true" or m.get("reason_unusable")),
     }

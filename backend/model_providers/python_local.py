@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any
 import os
+import platform
+import subprocess
 
 _log = logging.getLogger(__name__)
 
@@ -218,6 +220,128 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
     return normalized
 
 
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _windows_script_timeout_seconds() -> float:
+    try:
+        return float(os.getenv("ANTENNAMAP_DISCOVERY_TIMEOUT_SECONDS", "15"))
+    except ValueError:
+        return 15.0
+
+
+def _map_windows_script_findings(payload: dict[str, Any]) -> list[dict[str, str]]:
+    findings = payload.get("findings", []) if isinstance(payload, dict) else []
+    models: list[dict[str, str]] = []
+    llama_available = _module_available("llama_cpp")
+    transformers_available = _module_available("transformers")
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", ""))
+        name = str(item.get("name", "")).strip()
+        kind = str(item.get("kind", ""))
+        detector = str(item.get("detector", "powershell"))
+        details = item.get("details", {})
+        confidence = str(item.get("confidence", ""))
+
+        adapter = "custom"
+        importable = "false"
+        reason = "custom_runtime_adapter_missing"
+        model_id = ""
+
+        if path.startswith("ollama:") or kind == "ollama":
+            adapter = "ollama_py"
+            importable = "true" if _module_available("ollama") else "false"
+            reason = "" if importable == "true" else "ollama_not_importable"
+            model_id = path.replace("ollama:", "") or name
+        elif path.lower().endswith(".gguf") or kind == "gguf":
+            adapter = "llama_cpp"
+            importable = "true" if llama_available else "false"
+            reason = "" if importable == "true" else "llama_cpp_not_importable"
+        elif kind == "metadata_dir" or "models--" in path:
+            adapter = "transformers"
+            importable = "true" if transformers_available else "false"
+            reason = "" if importable == "true" else "transformers_not_importable"
+
+        entry = {
+            "name": name or f"file:{Path(path).stem}",
+            "display": f"Windows discovered: {name or Path(path).name}",
+            "adapter": adapter,
+            "importable": importable,
+            "reason_unusable": reason,
+            "detector": detector,
+            "kind": kind,
+            "confidence": confidence,
+            "details": json.dumps(details, sort_keys=True) if isinstance(details, (dict, list)) else str(details),
+        }
+        if model_id:
+            entry["model_id"] = model_id
+        else:
+            entry["path"] = path
+        models.append(entry)
+    return models
+
+
+def _discover_windows_with_script() -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {"source": "windows_powershell", "count": 0, "searched_paths": [], "error": ""}
+    if platform.system().lower() != "windows":
+        diagnostics["error"] = "not_windows"
+        return {"models": [], "diagnostics": diagnostics}
+    script = ROOT / "scripts" / "find_any_local_llm_models.ps1"
+    if not script.exists():
+        diagnostics["error"] = "script_missing"
+        return {"models": [], "diagnostics": diagnostics}
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-EmitJson"]
+    if _env_flag("ANTENNAMAP_DISCOVERY_DEEP_SCAN", False):
+        cmd.append("-DeepScan")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_windows_script_timeout_seconds(), check=False)
+    except subprocess.TimeoutExpired:
+        diagnostics["error"] = "timeout"
+        return {"models": [], "diagnostics": diagnostics}
+    except OSError as exc:
+        diagnostics["error"] = f"invoke_error:{exc}"
+        return {"models": [], "diagnostics": diagnostics}
+    if proc.returncode != 0:
+        diagnostics["error"] = f"exit_{proc.returncode}"
+        return {"models": [], "diagnostics": diagnostics}
+    try:
+        payload = json.loads(proc.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        diagnostics["error"] = "invalid_json"
+        return {"models": [], "diagnostics": diagnostics}
+    diagnostics["searched_paths"] = payload.get("searched_paths", []) if isinstance(payload, dict) else []
+    models = _map_windows_script_findings(payload if isinstance(payload, dict) else {})
+    diagnostics["count"] = len(models)
+    return {"models": models, "diagnostics": diagnostics}
+
+
+def _merge_models_preserve_first_runnable(models: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    key_to_idx: dict[str, int] = {}
+    for m in models:
+        normalized = _normalize_entry(m)
+        if not normalized.get("name"):
+            continue
+        stable_key = f"{normalized.get('name','')}|{normalized.get('path', normalized.get('model_id',''))}"
+        if stable_key not in key_to_idx:
+            key_to_idx[stable_key] = len(merged)
+            merged.append(normalized)
+            continue
+        current = merged[key_to_idx[stable_key]]
+        current_runnable = current.get("importable") == "true" and not current.get("reason_unusable")
+        incoming_runnable = normalized.get("importable") == "true" and not normalized.get("reason_unusable")
+        if (not current_runnable) and incoming_runnable:
+            merged[key_to_idx[stable_key]] = normalized
+    return merged
+
 def discover_models_detailed() -> list[dict[str, str]]:
     return discover_models_with_metadata()["models"]
 
@@ -225,51 +349,39 @@ def discover_models_detailed() -> list[dict[str, str]]:
 def discover_models_with_metadata() -> dict[str, Any]:
     """Return all discoverable local Python LLM models and discovery metadata."""
     models: list[dict[str, str]] = []
-    sources = {"registry": 0, "packages": 0, "filesystem": 0, "huggingface_cache": 0, "triangulation": 0}
+    sources = {"registry": 0, "packages": 0, "filesystem": 0, "huggingface_cache": 0, "triangulation": 0, "windows_powershell": 0}
+    diagnostics: dict[str, Any] = {"windows_powershell": {"enabled": False, "error": "disabled", "searched_paths": []}}
     search_roots = _configured_search_roots()
 
-    # 1. Registry overrides first
-    reg = _load_registry()
-    models.extend(reg)
-    sources["registry"] = len(reg)
-
-    # 2. Installed LLM Python packages
-    pkgs = scan_installed_llm_packages()
-    models.extend(pkgs)
-    sources["packages"] = len(pkgs)
-
-    # 3. File-based models in configured locations
-    files = _find_model_files(search_roots)
-    models.extend(files)
-    sources["filesystem"] = len(files)
-
-    # 4. HuggingFace cached models
-    hf = _find_hf_cache()
-    models.extend(hf)
-    sources["huggingface_cache"] = len(hf)
-
-    # 5. Built-in triangulation baseline
+    reg = _load_registry(); models.extend(reg); sources["registry"] = len(reg)
+    pkgs = scan_installed_llm_packages(); models.extend(pkgs); sources["packages"] = len(pkgs)
+    files = _find_model_files(search_roots); models.extend(files); sources["filesystem"] = len(files)
+    hf = _find_hf_cache(); models.extend(hf); sources["huggingface_cache"] = len(hf)
     tri = _find_triangulation_model()
-    if tri:
-        models.append(tri)
-        sources["triangulation"] = 1
+    if tri: models.append(tri); sources["triangulation"] = 1
 
-    # Deduplicate by name
-    seen: set[str] = set()
-    unique: list[dict[str, str]] = []
-    for m in models:
-        normalized = _normalize_entry(m)
-        if not normalized["name"]:
-            continue
-        if normalized["name"] not in seen:
-            seen.add(normalized["name"])
-            unique.append(normalized)
+    if _env_flag("ANTENNAMAP_DISCOVERY_USE_POWERSHELL", False):
+        win = _discover_windows_with_script()
+        win_models = win.get("models", [])
+        models.extend(win_models)
+        sources["windows_powershell"] = len(win_models)
+        diag = win.get("diagnostics", {}) if isinstance(win, dict) else {}
+        diag["enabled"] = True
+        diagnostics["windows_powershell"] = diag
+
+    unique = _merge_models_preserve_first_runnable(models)
+    searched_paths = [str(p) for p in search_roots] + [str(p) for p in _hf_cache_roots()]
+    win_paths = diagnostics.get("windows_powershell", {}).get("searched_paths", [])
+    for path in win_paths:
+        if path not in searched_paths:
+            searched_paths.append(path)
+
     return {
         "models": unique,
-        "searched_paths": [str(p) for p in search_roots] + [str(p) for p in _hf_cache_roots()],
+        "searched_paths": searched_paths,
         "source_counts": sources,
+        "discovery_sources": diagnostics,
     }
-
 
 def discover_python_local_models() -> list[str]:
     """Legacy: list of model names for backward compatibility."""
