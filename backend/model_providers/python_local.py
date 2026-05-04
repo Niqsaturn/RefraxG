@@ -84,10 +84,12 @@ def scan_installed_llm_packages() -> list[dict[str, str]]:
                 version = dist.metadata.get("Version", "")
                 found.append({
                     "name": norm,
+                    "model_id": norm,
                     "module": module,
                     "display": f"{display} ({raw_name} {version})".strip(),
                     "adapter": adapter,
                     "importable": "true" if importable else "false",
+                    "reason_unusable": "" if importable else f"{module}_not_importable",
                     "version": version,
                 })
                 break
@@ -140,6 +142,27 @@ def _load_registry() -> list[dict[str, str]]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
+    normalized = {k: str(v) for k, v in entry.items() if v is not None}
+    normalized.setdefault("name", "")
+    normalized.setdefault("display", normalized["name"])
+    normalized.setdefault("adapter", "custom")
+    normalized.setdefault("importable", "false")
+    if normalized.get("importable") not in ("true", "false"):
+        normalized["importable"] = "false"
+    if normalized["importable"] == "false" and not normalized.get("reason_unusable"):
+        normalized["reason_unusable"] = "missing_runtime_requirements"
+    has_locator = bool(normalized.get("path") or normalized.get("model_id"))
+    if not has_locator and normalized.get("importable") == "true":
+        normalized["model_id"] = normalized["name"]
+        has_locator = True
+    if normalized.get("adapter") in ("triangulation", "generic") and not has_locator:
+        has_locator = True
+    if not has_locator and not normalized.get("reason_unusable"):
+        normalized["reason_unusable"] = "missing_locator"
+    return normalized
+
+
 def discover_models_detailed() -> list[dict[str, str]]:
     """Return all discoverable local Python LLM models with metadata."""
     models: list[dict[str, str]] = []
@@ -165,9 +188,12 @@ def discover_models_detailed() -> list[dict[str, str]]:
     seen: set[str] = set()
     unique: list[dict[str, str]] = []
     for m in models:
-        if m["name"] not in seen:
-            seen.add(m["name"])
-            unique.append(m)
+        normalized = _normalize_entry(m)
+        if not normalized["name"]:
+            continue
+        if normalized["name"] not in seen:
+            seen.add(normalized["name"])
+            unique.append(normalized)
     return unique
 
 
@@ -207,6 +233,7 @@ def _find_gguf_files() -> list[dict[str, str]]:
                 "adapter": "llama_cpp",
                 "display": f"llama.cpp: {f.name}",
                 "importable": "true" if _module_available("llama_cpp") else "false",
+                "reason_unusable": "" if _module_available("llama_cpp") else "llama_cpp_not_importable",
             })
     return found
 
@@ -222,9 +249,11 @@ def _find_hf_cache() -> list[dict[str, str]]:
             found.append({
                 "name": f"hf:{model_id}",
                 "path": str(d),
+                "model_id": model_id,
                 "adapter": "transformers",
                 "display": f"HuggingFace: {model_id}",
                 "importable": "true" if _module_available("transformers") else "false",
+                "reason_unusable": "" if _module_available("transformers") else "transformers_not_importable",
             })
     return found
 

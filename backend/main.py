@@ -827,6 +827,8 @@ def discover_available_models() -> dict[str, Any]:
     return {
         "python_local": [m["name"] for m in py_models],
         "python_local_detailed": py_models,
+        "runnable_count": sum(1 for m in py_models if m.get("importable") == "true" and (m.get("path") or m.get("model_id") or m.get("adapter") in ("triangulation", "generic"))),
+        "unusable_count": sum(1 for m in py_models if m.get("importable") != "true" or m.get("reason_unusable")),
     }
 
 
@@ -835,10 +837,22 @@ def run_inference(provider: str, model: str, payload: dict) -> dict:
         from backend.model_providers.python_local import discover_models_detailed, run_llm_inference
         models = discover_models_detailed()
         entry = next((m for m in models if m["name"] == model), None)
-        if entry and entry.get("adapter") != "triangulation":
+        if entry is None:
+            logger.warning("model_resolution_failed code=not_found provider=%s model=%s", provider, model)
+            return {"provider": provider, "model": model, "error_code": "not_found", "error": f"Model '{model}' not found"}
+        if entry.get("importable") != "true" or entry.get("reason_unusable"):
+            reason = entry.get("reason_unusable", "missing_runtime_requirements")
+            logger.warning("model_resolution_failed code=unusable provider=%s model=%s reason=%s", provider, model, reason)
+            return {"provider": provider, "model": model, "error_code": "unusable", "error": f"Model '{model}' is unavailable: {reason}"}
+        logger.info("inference_start provider=%s model=%s adapter=%s", provider, model, entry.get("adapter", "unknown"))
+        if entry.get("adapter") != "triangulation":
             prompt = payload.get("prompt", "")
-            text = run_llm_inference(entry, prompt)
-            return {"provider": provider, "model": model, "response": text}
+            try:
+                text = run_llm_inference(entry, prompt)
+                return {"provider": provider, "model": model, "response": text}
+            except Exception as exc:
+                logger.warning("model_resolution_failed code=adapter_error provider=%s model=%s adapter=%s err=%s", provider, model, entry.get("adapter"), exc)
+                return {"provider": provider, "model": model, "error_code": "adapter_error", "error": str(exc)}
         # Triangulation baseline WLS
         samples_raw = payload.get("samples", [])
         if samples_raw:

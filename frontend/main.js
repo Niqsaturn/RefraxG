@@ -252,20 +252,21 @@ async function populateModelDropdown() {
   if (!modelDropdown) return;
   try {
     const data = await fetch('/api/models/discover').then((r) => r.json());
-    const options = [['', '— Select a model —']];
+    const options = [{ value: '', label: '— Select a model —', disabled: false }];
     const detailed = data.python_local_detailed || [];
     if (detailed.length > 0) {
       detailed.forEach((entry) => {
-        const label = _modelLabel(entry);
-        options.push([`python_local/${entry.name}`, label]);
+        const runnable = entry.importable === 'true' && !entry.reason_unusable;
+        const label = `${_modelLabel(entry)}${runnable ? '' : ' (unavailable)'}`;
+        options.push({ value: `python_local/${entry.name}`, label, disabled: !runnable });
       });
     } else {
-      (data.python_local || []).forEach((m) => options.push([`python_local/${m}`, `Local: ${m}`]));
+      (data.python_local || []).forEach((m) => options.push({ value: `python_local/${m}`, label: `Local: ${m}`, disabled: false }));
     }
     if (options.length === 1) {
-      options.push(['', '— No local Python LLMs detected —']);
+      options.push({ value: '', label: '— No local Python LLMs detected —', disabled: true });
     }
-    modelDropdown.innerHTML = options.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+    modelDropdown.innerHTML = options.map((o) => `<option value="${o.value}" ${o.disabled ? 'disabled' : ''}>${o.label}</option>`).join('');
     if (selectedModel) modelDropdown.value = selectedModel;
   } catch (_) {
     if (modelDropdown) modelDropdown.innerHTML = '<option value="">— unavailable —</option>';
@@ -278,10 +279,15 @@ async function applyModelSelection(value) {
   const [provider, ...rest] = value.split('/');
   const model = rest.join('/') || 'baseline-v1';
   const interval = parseInt(loopIntervalEl?.value || '60', 10);
-  await fetch(
+  const resp = await fetch(
     `/api/loop/config?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}&interval_seconds=${interval}`,
     { method: 'POST' }
-  ).catch(() => {});
+  ).catch(() => null);
+  if (!resp && loopStatus) loopStatus.textContent = 'Model apply failed: backend unreachable';
+  if (resp && !resp.ok && loopStatus) {
+    const body = await resp.text();
+    loopStatus.textContent = `Model apply failed: ${body}`;
+  }
 }
 
 // ── Main site + overlay source refresh ────────────────────────────────────
