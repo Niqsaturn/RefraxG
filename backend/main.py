@@ -889,6 +889,9 @@ def discover_available_models() -> dict[str, Any]:
         "hf_cache_paths": discovery.get("hf_cache_paths", []),
         "source_counts": discovery.get("source_counts", {}),
         "discovery_sources": discovery.get("discovery_sources", {}),
+        "external_source_used": discovery.get("external_source_used", False),
+        "external_entries_total": discovery.get("external_entries_total", 0),
+        "external_entries_runnable": discovery.get("external_entries_runnable", 0),
         "runnable_count": sum(1 for m in py_models if m.get("importable") == "true" and (m.get("path") or m.get("model_id") or m.get("adapter") in ("triangulation", "generic"))),
         "unusable_count": sum(1 for m in py_models if m.get("importable") != "true" or m.get("reason_unusable")),
     }
