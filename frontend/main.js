@@ -401,6 +401,29 @@ async function ensureMapDataLoadedAfterMigration() {
   return null;
 }
 
+async function fetchInitialFeatureSeed() {
+  if (details) details.textContent = 'Loading map data…';
+  const readiness = await waitForMapStoreMigrationReadiness({ timeoutMs: 7000, pollMs: 500 });
+  const maxAttempts = readiness?.map_store_migration_ready ? 2 : 8;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const resp = await fetch('/api/features');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const seed = await resp.json();
+      if (details) {
+        details.textContent = readiness?.map_store_migration_ready
+          ? 'Map data loaded.'
+          : 'Map data loaded (startup migration still finalizing in background).';
+      }
+      return seed;
+    } catch (_) {
+      if (details) details.textContent = `Loading map data… retry ${attempt}/${maxAttempts}`;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  }
+  return { type: 'FeatureCollection', features: [] };
+}
+
 async function _deterministicFeatureRefreshSequence() {
   await refreshLoopStatus();
   await refreshSource();
@@ -693,8 +716,8 @@ map.on('load', async () => {
 
   await ensureMapDataLoadedAfterMigration();
 
-  // Seed GeoJSON features from API
-  const seed = await fetch('/api/features').then((r) => r.json()).catch(() => ({ features: [] }));
+  // Seed GeoJSON features from API (deferred/retried while startup migration settles).
+  const seed = await fetchInitialFeatureSeed();
   sortedTimes = [...new Set(seed.features.map((f) => f.properties.timestamp))].filter(Boolean).sort();
 
   // ── Sources ──────────────────────────────────────────────────────────────
@@ -715,6 +738,9 @@ map.on('load', async () => {
   map.addSource('speculative-uncertain',{ type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
 
   const canRenderSymbolText = _hasValidGlyphs();
+
+  // Force deterministic post-init refresh so sources are synced after startup migration.
+  await _deterministicFeatureRefreshSequence();
 
   // ── Layers - base ────────────────────────────────────────────────────────
   map.addLayer({ id: 'infra-layer',    type: 'circle', source: 'sites',
