@@ -7,6 +7,7 @@ import time
 import yaml
 from dataclasses import asdict
 from datetime import datetime, timezone
+from collections import Counter
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -657,6 +658,8 @@ def _run_analysis_cycle(cfg: dict) -> None:
     # ------------------------------------------------------------------
     speculative = []
     publish_latencies_ms = []
+    persisted_writes_by_kind: Counter[str] = Counter()
+    last_persisted_write_at: str | None = None
     if result.detections:
         metrics["cycle_phase"] = "publishing"
         speculative = speculate_from_detections(result.detections, op_lat, op_lon)
@@ -685,6 +688,8 @@ def _run_analysis_cycle(cfg: dict) -> None:
             try:
                 p0 = _time.monotonic()
                 upsert_feature(feat)
+                persisted_writes_by_kind[str(feat.get("properties", {}).get("kind", "unknown"))] += 1
+                last_persisted_write_at = datetime.now(timezone.utc).isoformat()
                 # Apply Kalman smoothing to persisted position
                 fid = feat.get("properties", {}).get("id")
                 coords = feat.get("geometry", {}).get("coordinates", [])
@@ -697,6 +702,8 @@ def _run_analysis_cycle(cfg: dict) -> None:
                     feat["geometry"]["coordinates"] = [s_lon, s_lat]
                     feat.get("properties", {})["kalman_uncertainty_m"] = round(s_unc, 1)
                     upsert_feature(feat)
+                    persisted_writes_by_kind[str(feat.get("properties", {}).get("kind", "unknown"))] += 1
+                    last_persisted_write_at = datetime.now(timezone.utc).isoformat()
                     kf.save(fid)
                 publish_latencies_ms.append(round((_time.monotonic() - p0) * 1000, 2))
             except Exception as e:
@@ -752,6 +759,9 @@ def _run_analysis_cycle(cfg: dict) -> None:
         p95_idx = max(0, int(0.95 * (len(lat_sorted) - 1)))
         metrics["map_publish_latency_ms_p50"] = lat_sorted[p50_idx]
         metrics["map_publish_latency_ms_p95"] = lat_sorted[p95_idx]
+    metrics["persisted_feature_writes_by_kind"] = dict(persisted_writes_by_kind)
+    metrics["persisted_feature_writes_total"] = int(sum(persisted_writes_by_kind.values()))
+    metrics["last_persisted_feature_write_at"] = last_persisted_write_at
     metrics["cycle_duration_ms"] = round(ms, 1)
     loop_manager.set_cycle_metrics(metrics)
     try:
@@ -954,7 +964,8 @@ def get_features(kind: str | None = Query(default=None, pattern="^(infrastructur
             ]
 
     features = [enrich_feature(f, []) for f in features]
-    return {"type": "FeatureCollection", "features": features}
+    generated_at = datetime.now(timezone.utc).isoformat()
+    return {"type": "FeatureCollection", "features": features, "generated_at": generated_at, "total_count": len(features)}
 
 
 @app.get("/api/features/count")
