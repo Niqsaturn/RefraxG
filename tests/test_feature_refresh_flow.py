@@ -85,11 +85,16 @@ def test_api_features_includes_metadata_and_persisted_features(monkeypatch, tmp_
     assert payload["total_count"] >= 1
     ids = {f["properties"]["id"] for f in payload["features"]}
     assert "spec-api" in ids
+    loop_status = client.get("/api/loop/status").json()
+    assert "last_cycle_feature_write_metrics" in loop_status
 
 
 def test_frontend_refresh_sequence_and_metadata_display():
     js = Path("frontend/main.js").read_text(encoding="utf-8")
     assert "async function _deterministicFeatureRefreshSequence" in js
+    assert "await refreshLoopStatus();" in js
     assert "await refreshSource();" in js
     assert "await refreshSpeculative();" in js
     assert "health.lastFeaturePayloadGeneratedAt = data.generated_at || null;" in js
+    assert "Feature count mismatch: backend=" in js
+    assert "case 'analysis_cycle_success':" in js

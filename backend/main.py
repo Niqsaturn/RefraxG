@@ -101,6 +101,7 @@ from backend.analysis.kalman_tracker import PositionKalman
 from backend.analysis.ai_correction_loop import ai_correction_loop
 from backend.training.trainer import train_single_triangulation_baseline
 from backend.training.triangulation_baseline import estimate_single_operator
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_FILE = ROOT / "public" / "data" / "antenna_data.geojson"
@@ -525,6 +526,11 @@ def _run_analysis_cycle(cfg: dict) -> None:
         "map_publish_latency_ms_p50": 0.0,
         "map_publish_latency_ms_p95": 0.0,
         "cycle_started_at": cycle_started_at.isoformat(),
+        "detections_count": 0,
+        "speculative_written": 0,
+        "estimate_updated": 0,
+        "features_total_after_write": 0,
+        "feature_write_metrics_timestamp": None,
     }
     loop_snapshot = loop_manager.status()
     if loop_snapshot.get("last_run", {}).get("started_at"):
@@ -650,6 +656,7 @@ def _run_analysis_cycle(cfg: dict) -> None:
     metrics["candidates"] = len(result.detections)
     result.detections = corrected_detections
     metrics["detections"] = len(result.detections)
+    metrics["detections_count"] = len(result.detections)
     metrics["ai_corrections_applied"] = len([a for a in correction_audit if not a.get("rejected")])
     metrics["ai_corrections_rejected"] = len([a for a in correction_audit if a.get("rejected")])
 
@@ -761,9 +768,29 @@ def _run_analysis_cycle(cfg: dict) -> None:
         metrics["map_publish_latency_ms_p95"] = lat_sorted[p95_idx]
     metrics["persisted_feature_writes_by_kind"] = dict(persisted_writes_by_kind)
     metrics["persisted_feature_writes_total"] = int(sum(persisted_writes_by_kind.values()))
+    metrics["speculative_written"] = int(persisted_writes_by_kind.get("speculative", 0))
+    metrics["estimate_updated"] = int(persisted_writes_by_kind.get("estimate", 0))
+    features_after = get_all_features(limit=5000).get("features", [])
+    metrics["features_total_after_write"] = len(features_after)
+    metrics["feature_write_metrics_timestamp"] = datetime.now(timezone.utc).isoformat()
     metrics["last_persisted_feature_write_at"] = last_persisted_write_at
     metrics["cycle_duration_ms"] = round(ms, 1)
     loop_manager.set_cycle_metrics(metrics)
+    try:
+        from backend.foxhunt.auto_loop import event_bus
+        event_bus.publish({
+            "type": "analysis_cycle_success",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle_metrics": {
+                "detections_count": metrics["detections_count"],
+                "speculative_written": metrics["speculative_written"],
+                "estimate_updated": metrics["estimate_updated"],
+                "features_total_after_write": metrics["features_total_after_write"],
+                "timestamp": metrics["feature_write_metrics_timestamp"],
+            },
+        })
+    except Exception:
+        pass
     try:
         log_analysis(
             model=cfg.get("model", ""),
@@ -946,7 +973,16 @@ def config_loop(interval_seconds: int = 60, provider: str = "local", model: str 
 
 @app.get("/api/loop/status")
 def loop_status() -> dict:
-    return loop_manager.status()
+    status = loop_manager.status()
+    cm = status.get("cycle_metrics", {})
+    status["last_cycle_feature_write_metrics"] = {
+        "detections_count": cm.get("detections_count", 0),
+        "speculative_written": cm.get("speculative_written", 0),
+        "estimate_updated": cm.get("estimate_updated", 0),
+        "features_total_after_write": cm.get("features_total_after_write", 0),
+        "timestamp": cm.get("feature_write_metrics_timestamp"),
+    }
+    return status
 
 
 # ── Features ──────────────────────────────────────────────────────────────────

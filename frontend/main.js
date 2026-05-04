@@ -128,6 +128,7 @@ if (basemapModeSelect) {
 let sortedTimes = [];
 let sourcesInitialized = false;
 let selectedModel = '';
+let _lastLoopMetrics = null;
 function currentBasemapMode() {
   try {
     const m = localStorage.getItem(MAP_PROVIDER_CONFIG.storageKey);
@@ -260,6 +261,7 @@ async function refreshLoopStatus() {
     const s = await fetch('/api/loop/status').then((r) => r.json());
     const last = s.last_run?.last_successful_run_at ?? 'never';
     const m = s.cycle_metrics || {};
+    _lastLoopMetrics = s.last_cycle_feature_write_metrics || null;
     loopStatus.innerHTML =
       `<strong>Loop:</strong> ${s.active ? 'running' : 'paused'} · ` +
       `<strong>Provider:</strong> ${s.config.provider} · ` +
@@ -276,6 +278,13 @@ async function refreshLoopStatus() {
         `<strong>Solver:</strong> attempts ${m.solver_attempts ?? 0} · ok ${m.solver_successes ?? 0} · fail ${m.solver_failures ?? 0} (${reasons})<br>` +
         `<strong>AI corrections:</strong> applied ${m.ai_corrections_applied ?? 0} · rejected ${m.ai_corrections_rejected ?? 0}<br>` +
         `<strong>Map publish:</strong> ${m.map_publish_count ?? 0} · p50 ${m.map_publish_latency_ms_p50 ?? 0}ms · p95 ${m.map_publish_latency_ms_p95 ?? 0}ms`;
+      if (_lastLoopMetrics?.timestamp) {
+        loopDebugStatus.innerHTML +=
+          `<br><strong>Last write:</strong> det ${_lastLoopMetrics.detections_count ?? 0} · ` +
+          `spec ${_lastLoopMetrics.speculative_written ?? 0} · ` +
+          `est ${_lastLoopMetrics.estimate_updated ?? 0} · ` +
+          `total ${_lastLoopMetrics.features_total_after_write ?? 0}`;
+      }
     }
   } catch (_) { loopStatus.textContent = 'Loop: unavailable'; }
 }
@@ -393,6 +402,7 @@ async function ensureMapDataLoadedAfterMigration() {
 }
 
 async function _deterministicFeatureRefreshSequence() {
+  await refreshLoopStatus();
   await refreshSource();
   await refreshSpeculative();
 }
@@ -413,6 +423,7 @@ async function refreshSource() {
     health.lastFeatureFetchOkAt = new Date().toISOString();
     health.lastFeaturePayloadGeneratedAt = data.generated_at || null;
     const allFeatures = data.features || [];
+    const totalFetched = allFeatures.length;
     health.counts.infrastructure = allFeatures.filter((f) => f.properties.kind === 'infrastructure').length;
     health.counts.estimate = allFeatures.filter((f) => f.properties.kind === 'estimate').length;
     const visibleSites = (data.features || []).filter((f) =>
@@ -441,6 +452,14 @@ async function refreshSource() {
     _safeSetSourceData('confidence', { type: 'FeatureCollection', features: confidenceToggle?.checked ? confidence : [] }, 'features');
     _safeSetSourceData('range-bands', { type: 'FeatureCollection', features: rangeBandToggle?.checked ? rangeBands : [] }, 'features');
     _safeSetSourceData('uncertainty-polygons', { type: 'FeatureCollection', features: confidenceToggle?.checked ? uncertaintyPolygons : [] }, 'features');
+    if (_lastLoopMetrics?.timestamp && Number.isFinite(_lastLoopMetrics.features_total_after_write)) {
+      const expected = Number(_lastLoopMetrics.features_total_after_write);
+      if (expected !== totalFetched) {
+        const warning = `Feature count mismatch: backend=${expected}, fetched=${totalFetched}`;
+        loopStatus.innerHTML += `<br><span style="color:#f59e0b">${warning}</span>`;
+        health.render.features = warning;
+      }
+    }
     _renderHealth();
   } catch (err) {
     health.render.features = `error: ${err.message}`;
@@ -1320,6 +1339,11 @@ function _handleSseEvent(ev) {
           properties: { confidence: ev.confidence },
         }]});
       }
+      break;
+    }
+    case 'analysis_cycle_success': {
+      _deterministicFeatureRefreshSequence();
+      refreshAnalysisLog();
       break;
     }
 
