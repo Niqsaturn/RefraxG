@@ -63,6 +63,19 @@ _RUNNABLE_ADAPTERS: set[str] = {
     "triangulation",
 }
 
+_INFERENCE_DISPATCHABLE_ADAPTERS: set[str] = {
+    "llama_cpp",
+    "gpt4all",
+    "transformers",
+    "qwen",
+    "ctransformers",
+    "mlx_lm",
+    "ollama_py",
+    "openllm",
+    "generic",
+    "custom",
+}
+
 # ---------------------------------------------------------------------------
 # Package scanning
 # ---------------------------------------------------------------------------
@@ -186,7 +199,14 @@ def validate_discovered_adapters(models: list[dict[str, str]] | None = None) -> 
     models = models if models is not None else discover_models_detailed()
     mismatches: list[tuple[str, str]] = []
     for model in models:
-        if _normalize_adapter_key(model.get("adapter", "custom")) not in _RUNNABLE_ADAPTERS:
+        adapter = _normalize_adapter_key(model.get("adapter", "custom"))
+        importable = model.get("importable", "false") == "true"
+        reason = (model.get("reason_unusable", "") or "").strip()
+        dispatchable = adapter in _INFERENCE_DISPATCHABLE_ADAPTERS
+        if adapter not in _RUNNABLE_ADAPTERS:
+            mismatches.append((model.get("name", ""), model.get("adapter", "")))
+            continue
+        if importable and (not dispatchable) and not reason:
             mismatches.append((model.get("name", ""), model.get("adapter", "")))
     if mismatches:
         _log.warning("Discovered adapter keys are not runnable: %s", mismatches)
@@ -212,6 +232,9 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
     if adapter_reason:
         normalized["importable"] = "false"
         normalized["reason_unusable"] = adapter_reason
+    if normalized.get("importable") == "true" and adapter not in _INFERENCE_DISPATCHABLE_ADAPTERS:
+        normalized["importable"] = "false"
+        normalized["reason_unusable"] = f"non_dispatchable_adapter:{adapter}"
     has_locator = bool(normalized.get("path") or normalized.get("model_id"))
     if normalized.get("adapter") in ("triangulation", "generic") and not has_locator:
         has_locator = True
