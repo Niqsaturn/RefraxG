@@ -7,6 +7,7 @@ from statistics import mean, pstdev
 from typing import Any
 
 from backend.analysis.waterfall_analyzer import analyze_psd, freq_hopping_detected
+from backend.analysis.kalman_tracker import PositionKalman
 
 
 @dataclass
@@ -129,3 +130,12 @@ def derive_track_candidates(samples: list[dict[str, Any]]) -> list[TrackCandidat
             temporal_history=history,
         ))
     return out
+
+
+def streaming_track_update(
+    tracker: PositionKalman,
+    frame_pose_bearing: dict[str, Any],
+    dt_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """Streaming API: per-frame pose+bearing uncertainty -> updated track state."""
+    return tracker.streaming_update(frame_pose_bearing, dt_seconds=dt_seconds)

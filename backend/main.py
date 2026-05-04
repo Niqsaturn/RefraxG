@@ -97,6 +97,7 @@ from backend.storage.map_store import (
 from backend.analysis.waterfall_analyzer import analyze_psd
 from backend.analysis.range_estimator import estimate_range_km
 from backend.analysis.bearing_tracker import estimate_bearing as estimate_bearing_track
+from backend.analysis.bearing_tracker import estimate_array_bearing_with_uncertainty
 from backend.analysis.kalman_tracker import PositionKalman
 from backend.analysis.ai_correction_loop import ai_correction_loop
 from backend.training.trainer import train_single_triangulation_baseline
@@ -708,13 +709,31 @@ def _run_analysis_cycle(cfg: dict) -> None:
                 fid = feat.get("properties", {}).get("id")
                 coords = feat.get("geometry", {}).get("coordinates", [])
                 if fid and len(coords) == 2:
-                    unc_m = triangulation_anchor["uncertainty_m"] if triangulation_anchor else 2000.0
+                    bearing_frame = estimate_array_bearing_with_uncertainty({
+                        "bearing_deg": props.get("bearing_deg", 0.0),
+                        "snr_db": props.get("snr_db", 0.0),
+                        "frequency_hz": props.get("frequency_hz", 100e6),
+                        "bandwidth_hz": props.get("bandwidth_hz", 0.0),
+                    })
                     kf = PositionKalman.for_feature(fid, float(coords[1]), float(coords[0]))
-                    kf.predict()
-                    s_lat, s_lon, s_unc = kf.update(float(coords[1]), float(coords[0]), unc_m)
+                    state = kf.streaming_update({
+                        "observer_lat": op_lat,
+                        "observer_lon": op_lon,
+                        "bearing_deg": bearing_frame["bearing_deg"],
+                        "sigma_deg": bearing_frame["sigma_deg"],
+                        "range_guess_m": triangulation_anchor["uncertainty_m"] if triangulation_anchor else 2000.0,
+                    })
                     # Update stored position with Kalman-smoothed estimate
-                    feat["geometry"]["coordinates"] = [s_lon, s_lat]
-                    feat.get("properties", {})["kalman_uncertainty_m"] = round(s_unc, 1)
+                    feat["geometry"]["coordinates"] = [state["lon"], state["lat"]]
+                    feat_props = feat.get("properties", {})
+                    feat_props["kalman_uncertainty_m"] = state["uncertainty_m"]
+                    feat_props["uncertainty_ellipse_major_m"] = round(state["uncertainty_m"] * 1.5, 2)
+                    feat_props["uncertainty_ellipse_minor_m"] = round(state["uncertainty_m"] * 0.9, 2)
+                    feat_props["uncertainty_ellipse_heading_deg"] = float(bearing_frame["bearing_deg"])
+                    feat_props["position_source"] = "tracking_fusion"
+                    feat_props["quality_score"] = round(max(0.0, 1.0 - (state["uncertainty_m"] / 6000.0)), 3)
+                    feat_props["num_observations"] = int(feat_props.get("analysis_count", 1))
+                    feat_props["last_update"] = datetime.now(timezone.utc).isoformat()
                     upsert_feature(feat)
                     persisted_writes_by_kind[str(feat.get("properties", {}).get("kind", "unknown"))] += 1
                     last_persisted_write_at = datetime.now(timezone.utc).isoformat()
