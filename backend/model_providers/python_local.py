@@ -13,12 +13,14 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+import os
 
 _log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_FILE = ROOT / "backend" / "model_providers" / "python_local_models.json"
 TRIANGULATION_DIR = ROOT / "models"
+DISCOVERY_CONFIG_FILE = ROOT / "backend" / "model_providers" / "python_local_discovery.json"
 
 # ---------------------------------------------------------------------------
 # Known LLM packages: pattern → (importable_module, display_name, adapter_key)
@@ -161,25 +163,40 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
 
 
 def discover_models_detailed() -> list[dict[str, str]]:
-    """Return all discoverable local Python LLM models with metadata."""
+    return discover_models_with_metadata()["models"]
+
+
+def discover_models_with_metadata() -> dict[str, Any]:
+    """Return all discoverable local Python LLM models and discovery metadata."""
     models: list[dict[str, str]] = []
+    sources = {"registry": 0, "packages": 0, "filesystem": 0, "huggingface_cache": 0, "triangulation": 0}
+    search_roots = _configured_search_roots()
 
     # 1. Registry overrides first
-    models.extend(_load_registry())
+    reg = _load_registry()
+    models.extend(reg)
+    sources["registry"] = len(reg)
 
     # 2. Installed LLM Python packages
-    models.extend(scan_installed_llm_packages())
+    pkgs = scan_installed_llm_packages()
+    models.extend(pkgs)
+    sources["packages"] = len(pkgs)
 
-    # 3. GGUF files in common locations (for llama-cpp-python users)
-    models.extend(_find_gguf_files())
+    # 3. File-based models in configured locations
+    files = _find_model_files(search_roots)
+    models.extend(files)
+    sources["filesystem"] = len(files)
 
     # 4. HuggingFace cached models
-    models.extend(_find_hf_cache())
+    hf = _find_hf_cache()
+    models.extend(hf)
+    sources["huggingface_cache"] = len(hf)
 
     # 5. Built-in triangulation baseline
     tri = _find_triangulation_model()
     if tri:
         models.append(tri)
+        sources["triangulation"] = 1
 
     # Deduplicate by name
     seen: set[str] = set()
@@ -191,7 +208,11 @@ def discover_models_detailed() -> list[dict[str, str]]:
         if normalized["name"] not in seen:
             seen.add(normalized["name"])
             unique.append(normalized)
-    return unique
+    return {
+        "models": unique,
+        "searched_paths": [str(p) for p in search_roots] + [str(p) for p in _hf_cache_roots()],
+        "source_counts": sources,
+    }
 
 
 def discover_python_local_models() -> list[str]:
@@ -203,56 +224,105 @@ def discover_python_local_models() -> list[str]:
 # File-based model discovery helpers
 # ---------------------------------------------------------------------------
 
-_GGUF_SEARCH_DIRS = [
-    Path.home() / "models",
-    Path.home() / ".local" / "share" / "models",
-    Path.home() / ".local" / "share" / "nomic.ai" / "GPT4All",
-    Path("/opt/models"),
-    Path("/models"),
-    ROOT / "models",
-    ROOT / "backend" / "models",
-]
+_MODEL_EXTENSIONS = (".gguf", ".bin", ".safetensors")
 
 
-def _find_gguf_files() -> list[dict[str, str]]:
+def _configured_search_roots() -> list[Path]:
+    defaults = [Path("/workspace"), Path.home(), ROOT, Path("/models"), Path("/opt/models")]
+    configured: list[str] = []
+    raw_env = os.getenv("ANTENNAMAP_MODEL_SEARCH_PATHS", "")
+    if raw_env.strip():
+        configured.extend([part.strip() for part in raw_env.split(os.pathsep) if part.strip()])
+    if DISCOVERY_CONFIG_FILE.exists():
+        try:
+            payload = json.loads(DISCOVERY_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                value = payload.get("model_search_paths", [])
+                if isinstance(value, list):
+                    configured.extend([str(item) for item in value if str(item).strip()])
+        except (json.JSONDecodeError, OSError):
+            pass
+    paths = [Path(item).expanduser() for item in configured] + defaults
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        normalized = str(path.resolve()) if path.exists() else str(path)
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(path)
+    return unique
+
+
+def _find_model_files(search_roots: list[Path]) -> list[dict[str, str]]:
     found = []
     seen: set[str] = set()
-    for d in _GGUF_SEARCH_DIRS:
+    llama_available = _module_available("llama_cpp")
+    for d in search_roots:
         if not d.exists():
             continue
-        for f in d.rglob("*.gguf"):
+        for f in d.rglob("*"):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in _MODEL_EXTENSIONS:
+                continue
             if str(f) in seen:
                 continue
             seen.add(str(f))
+            adapter = "llama_cpp" if f.suffix.lower() == ".gguf" else "custom"
+            runtime_available = llama_available if adapter == "llama_cpp" else False
+            reason = "" if runtime_available else (f"{adapter}_not_importable" if adapter == "llama_cpp" else "custom_runtime_adapter_missing")
             found.append({
-                "name": f"gguf:{f.stem}",
+                "name": f"file:{f.stem}",
                 "path": str(f),
-                "adapter": "llama_cpp",
-                "display": f"llama.cpp: {f.name}",
-                "importable": "true" if _module_available("llama_cpp") else "false",
-                "reason_unusable": "" if _module_available("llama_cpp") else "llama_cpp_not_importable",
+                "adapter": adapter,
+                "display": f"Local file: {f.name}",
+                "importable": "true" if runtime_available else "false",
+                "reason_unusable": reason,
             })
     return found
 
 
 def _find_hf_cache() -> list[dict[str, str]]:
-    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
-    if not hf_hub.exists():
-        return []
     found = []
-    for d in hf_hub.iterdir():
-        if d.is_dir() and d.name.startswith("models--"):
-            model_id = d.name.removeprefix("models--").replace("--", "/")
-            found.append({
-                "name": f"hf:{model_id}",
-                "path": str(d),
-                "model_id": model_id,
-                "adapter": "transformers",
-                "display": f"HuggingFace: {model_id}",
-                "importable": "true" if _module_available("transformers") else "false",
-                "reason_unusable": "" if _module_available("transformers") else "transformers_not_importable",
-            })
+    transformers_available = _module_available("transformers")
+    for hf_hub in _hf_cache_roots():
+        if not hf_hub.exists():
+            continue
+        for d in hf_hub.iterdir():
+            if d.is_dir() and d.name.startswith("models--"):
+                model_id = d.name.removeprefix("models--").replace("--", "/")
+                found.append({
+                    "name": f"hf:{model_id}",
+                    "path": str(d),
+                    "model_id": model_id,
+                    "adapter": "transformers",
+                    "display": f"HuggingFace: {model_id}",
+                    "importable": "true" if transformers_available else "false",
+                    "reason_unusable": "" if transformers_available else "transformers_not_importable",
+                })
     return found
+
+
+def _hf_cache_roots() -> list[Path]:
+    candidates = [
+        os.getenv("HUGGINGFACE_HUB_CACHE", ""),
+        os.getenv("TRANSFORMERS_CACHE", ""),
+        os.getenv("HF_HOME", ""),
+        str(Path.home() / ".cache" / "huggingface" / "hub"),
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.name != "hub" and candidate == os.getenv("HF_HOME", ""):
+            path = path / "hub"
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            roots.append(path)
+    return roots
 
 
 def _module_available(module: str) -> bool:
