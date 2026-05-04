@@ -94,7 +94,7 @@ from backend.storage.map_store import (
     get_calibration_stats,
     record_position_error,
 )
-from backend.analysis.waterfall_analyzer import analyze_psd
+from backend.analysis.waterfall_analyzer import analyze_psd, NoiseFloorTracker, EventHysteresis
 from backend.analysis.range_estimator import estimate_range_km
 from backend.analysis.bearing_tracker import estimate_bearing as estimate_bearing_track
 from backend.analysis.kalman_tracker import PositionKalman
@@ -422,6 +422,17 @@ class LoopManager:
 loop_manager = LoopManager()
 
 
+ANALYSIS_RUNTIME_DEFAULTS = {
+    "spectral_sensitivity_db": 6.0,
+    "minimum_confidence": 0.35,
+    "event_hysteresis_frames": 3,
+    "decay_timeout_s": 120.0,
+}
+
+_noise_floor_tracker = NoiseFloorTracker(alpha=0.25)
+_event_hysteresis = EventHysteresis(required_frames=ANALYSIS_RUNTIME_DEFAULTS["event_hysteresis_frames"], decay_timeout_s=ANALYSIS_RUNTIME_DEFAULTS["decay_timeout_s"])
+
+
 def _load_ai_priors() -> dict:
     if AI_PRIORS_FILE.exists():
         return json.loads(AI_PRIORS_FILE.read_text(encoding="utf-8"))
@@ -520,6 +531,9 @@ def _run_analysis_cycle(cfg: dict) -> None:
         "cycle_phase": "starting",
         "live_frame_rate_fps": 0.0,
         "last_waterfall_frame_age_ms": None,
+        "dropped_frames": 0,
+        "active_interferers": 0,
+        "avg_confidence": 0.0,
         "detections": 0,
         "candidates": 0,
         "tracks": 0,
@@ -551,6 +565,8 @@ def _run_analysis_cycle(cfg: dict) -> None:
         if len(ts) >= 2:
             span = max((max(ts) - min(ts)).total_seconds(), 0.001)
             metrics["live_frame_rate_fps"] = round(len(samples) / span, 3)
+            expected = max(1, int(span / 15.0) + 1)
+            metrics["dropped_frames"] = max(0, expected - len(samples))
         if ts:
             metrics["last_waterfall_frame_age_ms"] = int((datetime.now(timezone.utc) - max(ts)).total_seconds() * 1000)
     if not samples:
@@ -583,7 +599,7 @@ def _run_analysis_cycle(cfg: dict) -> None:
             freq_hz = s.get("frequency_hz") or s.get("freq_hz") or 100e6
             sr = s.get("sample_rate_hz", 2_400_000.0) or 2_400_000.0
             try:
-                peaks = analyze_psd(psd, float(freq_hz), float(sr))
+                peaks = analyze_psd(psd, float(freq_hz), float(sr), min_snr_db=float(ANALYSIS_RUNTIME_DEFAULTS["spectral_sensitivity_db"]), noise_floor_tracker=_noise_floor_tracker, band_key=str(s.get("band") or s.get("freq_band") or "unknown"))
                 if peaks:
                     s["_spectral_peaks"] = [
                         {"freq_hz": p.center_freq_hz, "bw_hz": p.bandwidth_3db_hz,
@@ -661,8 +677,11 @@ def _run_analysis_cycle(cfg: dict) -> None:
     metrics["cycle_phase"] = "detected"
     corrected_detections, correction_audit, correction_stats = _apply_ai_correction_loop(result.detections, samples)
     metrics["candidates"] = len(result.detections)
-    result.detections = corrected_detections
+    min_conf = float(ANALYSIS_RUNTIME_DEFAULTS["minimum_confidence"])
+    result.detections = [d for d in corrected_detections if float(getattr(d, "confidence", 0.0)) >= min_conf]
     metrics["detections"] = len(result.detections)
+    metrics["active_interferers"] = len(result.detections)
+    metrics["avg_confidence"] = round((sum(float(getattr(d, "confidence", 0.0)) for d in result.detections) / len(result.detections)), 3) if result.detections else 0.0
     metrics["detections_count"] = len(result.detections)
     metrics["ai_corrections_applied"] = len([a for a in correction_audit if not a.get("rejected")])
     metrics["ai_corrections_rejected"] = len([a for a in correction_audit if a.get("rejected")])
@@ -675,6 +694,14 @@ def _run_analysis_cycle(cfg: dict) -> None:
     persisted_writes_by_kind: Counter[str] = Counter()
     last_persisted_write_at: str | None = None
     if result.detections:
+        now_s = time.time()
+        stable = []
+        for d in result.detections:
+            eid = f"{getattr(d, "freq_band", "unknown")}:{getattr(d, "signal_id", "sig")}"
+            if _event_hysteresis.observe(eid, now_s):
+                stable.append(d)
+        result.detections = stable
+        metrics["active_interferers"] = len(result.detections)
         metrics["cycle_phase"] = "publishing"
         speculative = speculate_from_detections(result.detections, op_lat, op_lon)
         metrics["tracks"] = len(speculative)
@@ -1009,18 +1036,29 @@ def resume_loop() -> dict:
 
 
 @app.post("/api/loop/config")
-def config_loop(interval_seconds: int = 60, provider: str = "local", model: str = "baseline-v1") -> dict:
+def config_loop(interval_seconds: int = 60, provider: str = "local", model: str = "baseline-v1", sensitivity: float | None = None, minimum_confidence: float | None = None, decay_timeout: float | None = None, event_hysteresis_frames: int | None = None) -> dict:
     validation_error = validate_python_local_model(provider, model)
     if validation_error is not None:
         loop_manager.set_config_error(validation_error)
         raise HTTPException(status_code=400, detail=validation_error)
-    return {"config": loop_manager.update_config(interval_seconds, provider, model)}
+    if sensitivity is not None:
+        ANALYSIS_RUNTIME_DEFAULTS["spectral_sensitivity_db"] = float(max(1.0, min(30.0, sensitivity)))
+    if minimum_confidence is not None:
+        ANALYSIS_RUNTIME_DEFAULTS["minimum_confidence"] = float(max(0.0, min(1.0, minimum_confidence)))
+    if decay_timeout is not None:
+        ANALYSIS_RUNTIME_DEFAULTS["decay_timeout_s"] = float(max(5.0, decay_timeout))
+    if event_hysteresis_frames is not None:
+        ANALYSIS_RUNTIME_DEFAULTS["event_hysteresis_frames"] = int(max(1, min(20, event_hysteresis_frames)))
+    _event_hysteresis.required_frames = ANALYSIS_RUNTIME_DEFAULTS["event_hysteresis_frames"]
+    _event_hysteresis.decay_timeout_s = ANALYSIS_RUNTIME_DEFAULTS["decay_timeout_s"]
+    return {"config": loop_manager.update_config(interval_seconds, provider, model), "analysis_runtime": ANALYSIS_RUNTIME_DEFAULTS}
 
 
 @app.get("/api/loop/status")
 def loop_status() -> dict:
     status = loop_manager.status()
     cm = status.get("cycle_metrics", {})
+    status["analysis_runtime"] = ANALYSIS_RUNTIME_DEFAULTS.copy()
     status["last_cycle_feature_write_metrics"] = {
         "detections_count": cm.get("detections_count", 0),
         "speculative_written": cm.get("speculative_written", 0),
@@ -1385,7 +1423,8 @@ async def analysis_run(body: AnalysisRunRequest) -> dict:
 
     result = detect_signals(samples, model_config, fcc_context, examples_text, op_lat, op_lon)
     corrected_detections, correction_audit, correction_stats = _apply_ai_correction_loop(result.detections, samples)
-    result.detections = corrected_detections
+    min_conf = float(ANALYSIS_RUNTIME_DEFAULTS["minimum_confidence"])
+    result.detections = [d for d in corrected_detections if float(getattr(d, "confidence", 0.0)) >= min_conf]
 
     speculative_features = []
     if result.detections and (op_lat or op_lon):

@@ -20,6 +20,53 @@ class SpectralPeak:
     bin_index: int         # index in original PSD array
 
 
+@dataclass
+class NoiseFloorTracker:
+    """Adaptive noise-floor tracker keyed by band label."""
+    alpha: float = 0.25
+    history: dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.history is None:
+            self.history = {}
+
+    def update(self, band_key: str, instant_floor: float) -> float:
+        prev = self.history.get(band_key)
+        if prev is None:
+            self.history[band_key] = instant_floor
+            return instant_floor
+        smoothed = (1.0 - self.alpha) * prev + self.alpha * instant_floor
+        self.history[band_key] = smoothed
+        return smoothed
+
+
+@dataclass
+class EventHysteresis:
+    """Consecutive-frame gate for event create/upgrade stability."""
+    required_frames: int = 3
+    decay_timeout_s: float = 120.0
+    counters: dict[str, int] | None = None
+    last_seen_ts: dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.counters is None:
+            self.counters = {}
+        if self.last_seen_ts is None:
+            self.last_seen_ts = {}
+
+    def observe(self, event_id: str, ts_s: float) -> bool:
+        self.prune(ts_s)
+        self.counters[event_id] = self.counters.get(event_id, 0) + 1
+        self.last_seen_ts[event_id] = ts_s
+        return self.counters[event_id] >= self.required_frames
+
+    def prune(self, now_s: float) -> None:
+        stale = [k for k, t in self.last_seen_ts.items() if (now_s - t) > self.decay_timeout_s]
+        for k in stale:
+            self.last_seen_ts.pop(k, None)
+            self.counters.pop(k, None)
+
+
 def _noise_floor(psd_bins_db: list[float], noise_figure_db: float) -> float:
     """Bottom 5th-percentile mean of PSD bins + NF correction.
 
@@ -57,6 +104,8 @@ def analyze_psd(
     sample_rate_hz: float,
     noise_figure_db: float = 5.0,
     min_snr_db: float = 6.0,
+    noise_floor_tracker: NoiseFloorTracker | None = None,
+    band_key: str | None = None,
 ) -> list[SpectralPeak]:
     """Detect signal peaks in a PSD array and return SpectralPeak objects.
 
@@ -69,6 +118,8 @@ def analyze_psd(
 
     n = len(psd_bins_db)
     floor = _noise_floor(psd_bins_db, noise_figure_db)
+    if noise_floor_tracker and band_key:
+        floor = noise_floor_tracker.update(band_key, floor)
     threshold = floor + min_snr_db
 
     # Find above-threshold runs

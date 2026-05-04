@@ -276,7 +276,8 @@ async function refreshLoopStatus() {
       const frameAgeSec = Number.isFinite(m.last_waterfall_frame_age_ms) ? (m.last_waterfall_frame_age_ms / 1000).toFixed(1) : '-';
       loopDebugStatus.innerHTML =
         `<strong>Cycle:</strong> #${m.cycle_index ?? '-'} · phase ${m.cycle_phase || '-'}<br>` +
-        `<strong>Waterfall:</strong> ${m.live_frame_rate_fps ?? 0} fps · age ${frameAgeSec}s<br>` +
+        `<strong>Waterfall:</strong> ${m.live_frame_rate_fps ?? 0} fps · age ${frameAgeSec}s · dropped ${m.dropped_frames ?? 0}<br>` +
+        `<strong>Interferers:</strong> active ${m.active_interferers ?? 0} · avg conf ${((m.avg_confidence ?? 0) * 100).toFixed(1)}% · update p95 ${m.map_publish_latency_ms_p95 ?? 0}ms<br>` +
         `<strong>Counts:</strong> det ${m.detections ?? 0} · cand ${m.candidates ?? 0} · tracks ${m.tracks ?? 0}<br>` +
         `<strong>Solver:</strong> attempts ${m.solver_attempts ?? 0} · ok ${m.solver_successes ?? 0} · fail ${m.solver_failures ?? 0} (${reasons})<br>` +
         `<strong>AI corrections:</strong> applied ${m.ai_corrections_applied ?? 0} · rejected ${m.ai_corrections_rejected ?? 0}<br>` +
