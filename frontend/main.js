@@ -268,6 +268,9 @@ async function refreshLoopStatus() {
       `<strong>Model:</strong> ${s.config.model || '-'}<br>` +
       `<strong>Interval:</strong> ${s.config.interval_seconds}s · ` +
       `<strong>Last OK:</strong> ${last.slice(0, 19).replace('T', ' ')}`;
+    if (s.config_error) {
+      loopStatus.innerHTML += `<br><strong>Config error:</strong> ${s.config_error.error_code} · ${s.config_error.error}`;
+    }
     if (loopDebugStatus) {
       const reasons = (m.solver_failure_reasons || []).slice(0, 3).join(', ') || 'none';
       const frameAgeSec = Number.isFinite(m.last_waterfall_frame_age_ms) ? (m.last_waterfall_frame_age_ms / 1000).toFixed(1) : '-';
@@ -351,8 +354,18 @@ async function applyModelSelection(value) {
   ).catch(() => null);
   if (!resp && loopStatus) loopStatus.textContent = 'Model apply failed: backend unreachable';
   if (resp && !resp.ok && loopStatus) {
-    const body = await resp.text();
-    loopStatus.textContent = `Model apply failed: ${body}`;
+    let message = 'Model apply failed';
+    try {
+      const body = await resp.json();
+      const detail = body?.detail || {};
+      if (detail.error_code) message = `Model apply failed (${detail.error_code}): ${detail.error || detail.message || 'Unknown error'}`;
+      else if (body?.detail) message = `Model apply failed: ${body.detail}`;
+    } catch (_) {
+      const bodyText = await resp.text();
+      message = `Model apply failed: ${bodyText}`;
+    }
+    loopStatus.textContent = message;
+    await refreshLoopStatus();
     return;
   }
   await _deterministicFeatureRefreshSequence();
