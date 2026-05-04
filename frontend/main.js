@@ -93,6 +93,7 @@ let sourcesInitialized = false;
 let selectedModel = '';
 const health = {
   lastFeatureFetchOkAt: null,
+  lastFeaturePayloadGeneratedAt: null,
   counts: { infrastructure: 0, estimate: 0, speculative: 0, fox_targets: 0 },
   render: { features: 'pending', speculative: 'pending', satellites: 'pending', fox_targets: 'pending' },
 };
@@ -138,8 +139,11 @@ function _safeSetSourceData(sourceId, data, statusKey) {
 function _renderHealth() {
   if (featureHealthStatus) {
     const lastOk = health.lastFeatureFetchOkAt ? new Date(health.lastFeatureFetchOkAt).toLocaleTimeString() : 'never';
+    const generatedAt = health.lastFeaturePayloadGeneratedAt
+      ? new Date(health.lastFeaturePayloadGeneratedAt).toLocaleTimeString()
+      : 'unknown';
     featureHealthStatus.innerHTML =
-      `<strong>Features:</strong> last OK ${lastOk}<br>` +
+      `<strong>Features:</strong> last OK ${lastOk} · generated ${generatedAt}<br>` +
       `infra ${health.counts.infrastructure} · estimate ${health.counts.estimate} · speculative ${health.counts.speculative} · fox ${health.counts.fox_targets}`;
   }
   if (renderHealthStatus) {
@@ -287,7 +291,15 @@ async function applyModelSelection(value) {
   if (resp && !resp.ok && loopStatus) {
     const body = await resp.text();
     loopStatus.textContent = `Model apply failed: ${body}`;
+    return;
   }
+  await _deterministicFeatureRefreshSequence();
+}
+
+
+async function _deterministicFeatureRefreshSequence() {
+  await refreshSource();
+  await refreshSpeculative();
 }
 
 // ── Main site + overlay source refresh ────────────────────────────────────
@@ -304,6 +316,7 @@ async function refreshSource() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     health.lastFeatureFetchOkAt = new Date().toISOString();
+    health.lastFeaturePayloadGeneratedAt = data.generated_at || null;
     const allFeatures = data.features || [];
     health.counts.infrastructure = allFeatures.filter((f) => f.properties.kind === 'infrastructure').length;
     health.counts.estimate = allFeatures.filter((f) => f.properties.kind === 'estimate').length;
