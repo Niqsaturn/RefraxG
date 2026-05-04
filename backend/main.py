@@ -770,9 +770,20 @@ def _run_analysis_cycle(cfg: dict) -> None:
     metrics["persisted_feature_writes_total"] = int(sum(persisted_writes_by_kind.values()))
     metrics["speculative_written"] = int(persisted_writes_by_kind.get("speculative", 0))
     metrics["estimate_updated"] = int(persisted_writes_by_kind.get("estimate", 0))
+    write_ts = datetime.now(timezone.utc).isoformat()
+    metrics["feature_write_counts"] = {
+        "speculative": metrics["speculative_written"],
+        "estimate": metrics["estimate_updated"],
+        "detections": metrics["detections_count"],
+    }
+    metrics["feature_write_timestamps"] = {
+        "speculative": write_ts if metrics["feature_write_counts"]["speculative"] > 0 else None,
+        "estimate": write_ts if metrics["feature_write_counts"]["estimate"] > 0 else None,
+        "detections": write_ts if metrics["feature_write_counts"]["detections"] > 0 else None,
+    }
     features_after = get_all_features(limit=5000).get("features", [])
     metrics["features_total_after_write"] = len(features_after)
-    metrics["feature_write_metrics_timestamp"] = datetime.now(timezone.utc).isoformat()
+    metrics["feature_write_metrics_timestamp"] = write_ts
     metrics["last_persisted_feature_write_at"] = last_persisted_write_at
     metrics["cycle_duration_ms"] = round(ms, 1)
     loop_manager.set_cycle_metrics(metrics)
@@ -981,6 +992,8 @@ def loop_status() -> dict:
         "estimate_updated": cm.get("estimate_updated", 0),
         "features_total_after_write": cm.get("features_total_after_write", 0),
         "timestamp": cm.get("feature_write_metrics_timestamp"),
+        "write_counts": cm.get("feature_write_counts", {}),
+        "write_timestamps": cm.get("feature_write_timestamps", {}),
     }
     return status
 

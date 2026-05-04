@@ -87,6 +87,31 @@ def test_api_features_includes_metadata_and_persisted_features(monkeypatch, tmp_
     assert "spec-api" in ids
     loop_status = client.get("/api/loop/status").json()
     assert "last_cycle_feature_write_metrics" in loop_status
+    assert "write_counts" in loop_status["last_cycle_feature_write_metrics"]
+    assert "write_timestamps" in loop_status["last_cycle_feature_write_metrics"]
+
+
+def test_feature_persist_and_render_continuity(monkeypatch, tmp_path):
+    db_path = tmp_path / "map_store.db"
+    monkeypatch.setattr(map_store, "DB_PATH", db_path)
+
+    feature = {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [-122.4001, 37.7001]},
+        "properties": {"id": "continuity-1", "kind": "estimate", "confidence": 0.85},
+    }
+    map_store.upsert_feature(feature)
+
+    client = TestClient(app)
+    first = client.get("/api/features").json()
+    second = client.get("/api/features").json()
+
+    first_ids = {f["properties"]["id"] for f in first["features"]}
+    second_ids = {f["properties"]["id"] for f in second["features"]}
+    assert "continuity-1" in first_ids
+    assert first_ids == second_ids
+    assert first["total_count"] == second["total_count"]
+    assert first["generated_at"] != second["generated_at"]
 
 
 def test_frontend_refresh_sequence_and_metadata_display():
@@ -97,4 +122,6 @@ def test_frontend_refresh_sequence_and_metadata_display():
     assert "await refreshSpeculative();" in js
     assert "health.lastFeaturePayloadGeneratedAt = data.generated_at || null;" in js
     assert "Feature count mismatch: backend=" in js
+    assert "write_counts" in js
+    assert "write_timestamps" in js
     assert "case 'analysis_cycle_success':" in js

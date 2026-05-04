@@ -279,11 +279,16 @@ async function refreshLoopStatus() {
         `<strong>AI corrections:</strong> applied ${m.ai_corrections_applied ?? 0} · rejected ${m.ai_corrections_rejected ?? 0}<br>` +
         `<strong>Map publish:</strong> ${m.map_publish_count ?? 0} · p50 ${m.map_publish_latency_ms_p50 ?? 0}ms · p95 ${m.map_publish_latency_ms_p95 ?? 0}ms`;
       if (_lastLoopMetrics?.timestamp) {
+        const writeCounts = _lastLoopMetrics.write_counts || {};
+        const writeTimestamps = _lastLoopMetrics.write_timestamps || {};
         loopDebugStatus.innerHTML +=
           `<br><strong>Last write:</strong> det ${_lastLoopMetrics.detections_count ?? 0} · ` +
           `spec ${_lastLoopMetrics.speculative_written ?? 0} · ` +
           `est ${_lastLoopMetrics.estimate_updated ?? 0} · ` +
-          `total ${_lastLoopMetrics.features_total_after_write ?? 0}`;
+          `total ${_lastLoopMetrics.features_total_after_write ?? 0}` +
+          `<br><strong>Per-kind:</strong> det ${writeCounts.detections ?? 0} @ ${(writeTimestamps.detections || '-').slice(0, 19).replace('T', ' ')} · ` +
+          `spec ${writeCounts.speculative ?? 0} @ ${(writeTimestamps.speculative || '-').slice(0, 19).replace('T', ' ')} · ` +
+          `est ${writeCounts.estimate ?? 0} @ ${(writeTimestamps.estimate || '-').slice(0, 19).replace('T', ' ')}`;
       }
     }
   } catch (_) { loopStatus.textContent = 'Loop: unavailable'; }
