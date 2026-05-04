@@ -956,6 +956,9 @@ def status() -> dict:
         "status": "ok",
         "service": "antennamap",
         "sdr_events": event_bus.sdr_stats(),
+        "map_store_migration_ready": _migration_readiness["ready"],
+        "migrated_count": _migration_readiness["migrated_count"],
+        "migration_error": _migration_readiness["error"],
     }
 
 
