@@ -90,3 +90,28 @@ If token/config is missing, the app automatically uses OSM raster fallback.
 - OSM tile usage must comply with OpenStreetMap tile usage policy and attribution requirements.
 - Third-party vector/satellite providers require their own valid API token, billing plan, and attribution text per provider terms.
 - Not all providers permit satellite imagery, offline caching, or high-volume tile redistribution under standard plans; verify provider license terms before production deployment.
+
+## Bundled local model contract (Qwen 3.5 4B)
+
+- Canonical bundled model entry is pinned in `backend/model_providers/python_local_models.json` with name `qwen3.5-4b-bundled`.
+- Canonical install/discovery location is `models/qwen3_5_4b/qwen3_5_4b.gguf`.
+- Fast presence checks use `models/qwen3_5_4b/.bundled_model_marker`.
+- Model discovery and loop default selection prefer this exact model name first when runnable; otherwise the next runnable model is selected, then `triangulation-baseline` fallback.
+
+### Runtime dependencies by adapter
+
+- `llama_cpp` → install `llama-cpp-python`
+- `transformers` → install `transformers`
+- `ollama_py` → install `ollama`
+- `openllm` → install `openllm`
+
+### Verify and troubleshoot
+
+1. `GET /api/models/discover` and inspect `python_local_detailed` for:
+   - `name`, `adapter`, `importable`, `reason_unusable`, `path`/`model_id`.
+2. `GET /api/loop/status` and `GET /api/status` for active selection and last analysis write timestamp.
+3. Common `reason_unusable` codes:
+   - `missing_locator`: registry entry missing `path`/`model_id`
+   - `*_not_importable`: adapter runtime package missing
+   - `unsupported_adapter:<adapter>`: adapter key not runnable
+   - `non_dispatchable_adapter:<adapter>`: discovered but not inference-dispatchable

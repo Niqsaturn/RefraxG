@@ -48,6 +48,24 @@ def test_run_inference_unusable_model_explicit_error(monkeypatch):
     assert out["error_code"] == "unusable"
 
 
+def test_default_selection_prefers_bundled_qwen_when_runnable():
+    model, reason = main._resolve_default_python_local_model([
+        {"name": "other", "importable": "true", "adapter": "llama_cpp", "path": "/tmp/other.gguf"},
+        {"name": "qwen3.5-4b-bundled", "importable": "true", "adapter": "llama_cpp", "path": "models/qwen3_5_4b/qwen3_5_4b.gguf"},
+    ])
+    assert model == "qwen3.5-4b-bundled"
+    assert reason == "bundled_qwen_runnable"
+
+
+def test_default_selection_skips_unusable_qwen():
+    model, reason = main._resolve_default_python_local_model([
+        {"name": "qwen3.5-4b-bundled", "importable": "false", "reason_unusable": "llama_cpp_not_importable"},
+        {"name": "other", "importable": "true", "adapter": "llama_cpp", "path": "/tmp/other.gguf"},
+    ])
+    assert model == "other"
+    assert reason == "next_runnable"
+
+
 def test_env_configured_search_paths(monkeypatch, tmp_path):
     model_root = tmp_path / "models"
     model_root.mkdir()

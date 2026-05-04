@@ -116,6 +116,7 @@ ML_MODELS_DIR = ROOT / "backend" / "ml" / "models"
 RUNTIME_CONFIG_FILE = ROOT / "backend" / "pipeline" / "data" / "runtime_config.json"
 TRAINING_STATUS_FILE = ROOT / "backend" / "pipeline" / "data" / "training_status.json"
 AI_PRIORS_FILE = ROOT / "backend" / "pipeline" / "data" / "ai_priors.json"
+BUNDLED_QWEN_NAME = "qwen3.5-4b-bundled"
 
 
 class SDRConfigureRequest(BaseModel):
@@ -897,6 +898,21 @@ def discover_available_models() -> dict[str, Any]:
     }
 
 
+def _resolve_default_python_local_model(models: list[dict[str, Any]]) -> tuple[str, str]:
+    qwen = next((m for m in models if m.get("name") == BUNDLED_QWEN_NAME), None)
+    if qwen and qwen.get("importable") == "true" and not qwen.get("reason_unusable"):
+        logger.info("default_model_resolution selected=%s reason=bundled_qwen_runnable", BUNDLED_QWEN_NAME)
+        return BUNDLED_QWEN_NAME, "bundled_qwen_runnable"
+    if qwen:
+        logger.info("default_model_resolution skipped=%s reason=%s", BUNDLED_QWEN_NAME, qwen.get("reason_unusable", "not_importable"))
+    fallback = next((m for m in models if m.get("importable") == "true" and not m.get("reason_unusable")), None)
+    if fallback:
+        logger.info("default_model_resolution selected=%s reason=next_runnable", fallback.get("name"))
+        return str(fallback.get("name")), "next_runnable"
+    logger.info("default_model_resolution selected=triangulation-baseline reason=no_runnable_python_local")
+    return "triangulation-baseline", "triangulation_fallback"
+
+
 def run_inference(provider: str, model: str, payload: dict) -> dict:
     if provider == "python_local":
         from backend.model_providers.python_local import discover_models_detailed, run_llm_inference
@@ -947,13 +963,16 @@ def validate_python_local_model(provider: str, model: str) -> dict[str, str] | N
 
     entry = next((m for m in discover_models_detailed() if m.get("name") == model), None)
     if entry is None:
+        logger.warning("loop_config_validation_failed code=not_found provider=%s model=%s", provider, model)
         return {"provider": provider, "model": model, "error_code": "not_found", "error": f"Model '{model}' not found"}
     if entry.get("importable") != "true" or entry.get("reason_unusable"):
         reason = entry.get("reason_unusable", "missing_runtime_requirements")
+        logger.warning("loop_config_validation_failed code=unusable provider=%s model=%s reason=%s", provider, model, reason)
         return {"provider": provider, "model": model, "error_code": "unusable", "error": f"Model '{model}' is unavailable: {reason}"}
     if entry.get("adapter") not in {"triangulation", "llama_cpp", "gpt4all", "transformers", "qwen", "ctransformers", "mlx_lm", "ollama_py", "openllm", "generic", "custom"}:
         adapter = entry.get("adapter", "unknown")
-        return {"provider": provider, "model": model, "error_code": "adapter_not_supported", "error": f"Model '{model}' adapter '{adapter}' is not supported"}
+        logger.warning("loop_config_validation_failed code=adapter_error provider=%s model=%s adapter=%s", provider, model, adapter)
+        return {"provider": provider, "model": model, "error_code": "adapter_error", "error": f"Model '{model}' adapter '{adapter}' is not supported"}
     return None
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -998,6 +1017,7 @@ def status() -> dict:
         "map_store_migration_ready": _migration_readiness["ready"],
         "migrated_count": _migration_readiness["migrated_count"],
         "migration_error": _migration_readiness["error"],
+        "last_analysis_cycle_write": loop_manager.status().get("cycle_metrics", {}).get("feature_write_metrics_timestamp"),
     }
 
 
@@ -2030,9 +2050,9 @@ async def _capture_loop() -> None:
     try:
         from backend.model_providers.python_local import validate_discovered_adapters
         validate_discovered_adapters()
-        py_models = discover_python_local_models()
+        py_models = discover_available_models().get("python_local_detailed", [])
         provider = "python_local"
-        model = py_models[0] if py_models else "triangulation-baseline"
+        model, _ = _resolve_default_python_local_model(py_models)
         loop_manager.update_config(interval_seconds=60, provider=provider, model=model)
         loop_manager.start()
         logger.info("analysis loop auto-started: provider=%s model=%s", provider, model)

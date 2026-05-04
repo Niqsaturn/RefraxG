@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_FILE = ROOT / "backend" / "model_providers" / "python_local_models.json"
 TRIANGULATION_DIR = ROOT / "models"
 DISCOVERY_CONFIG_FILE = ROOT / "backend" / "model_providers" / "python_local_discovery.json"
+BUNDLED_QWEN_MARKER = ROOT / "models" / "qwen3_5_4b" / ".bundled_model_marker"
+BUNDLED_QWEN_NAME = "qwen3.5-4b-bundled"
 
 # ---------------------------------------------------------------------------
 # Known LLM packages: pattern → (importable_module, display_name, adapter_key)
@@ -241,6 +243,11 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
         has_locator = True
     if not has_locator and not normalized.get("reason_unusable"):
         normalized["reason_unusable"] = "missing_locator"
+    if normalized.get("importable") == "true":
+        normalized["reason_unusable"] = ""
+    if normalized.get("name") == BUNDLED_QWEN_NAME:
+        normalized["is_bundled"] = "true"
+        normalized["bundled_marker_present"] = "true" if BUNDLED_QWEN_MARKER.exists() else "false"
     return normalized
 
 
@@ -530,6 +537,11 @@ def discover_models_with_metadata() -> dict[str, Any]:
         diagnostics["windows_powershell"] = diag
 
     unique = _merge_models_preserve_first_runnable(models)
+    _log.info(
+        "model_discovery_counts registry=%d packages=%d filesystem=%d hf_cache=%d triangulation=%d external=%d total_unique=%d",
+        sources["registry"], sources["packages"], sources["filesystem"], sources["huggingface_cache"],
+        sources["triangulation"], sources["windows_powershell"], len(unique)
+    )
     searched_paths = [str(p) for p in search_roots] + [str(p) for p in _hf_cache_roots()]
     win_paths = diagnostics.get("windows_powershell", {}).get("searched_paths", [])
     for path in win_paths:
