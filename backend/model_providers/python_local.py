@@ -84,10 +84,12 @@ def scan_installed_llm_packages() -> list[dict[str, str]]:
                 version = dist.metadata.get("Version", "")
                 found.append({
                     "name": norm,
+                    "model_id": norm,
                     "module": module,
                     "display": f"{display} ({raw_name} {version})".strip(),
                     "adapter": adapter,
                     "importable": "true" if importable else "false",
+                    "reason_unusable": "" if importable else f"{module}_not_importable",
                     "version": version,
                 })
                 break
