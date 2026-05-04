@@ -16,6 +16,7 @@ from typing import Any
 import os
 import platform
 import subprocess
+import hashlib
 
 _log = logging.getLogger(__name__)
 
@@ -270,6 +271,120 @@ def _as_confidence(value: Any, default: float = 0.5) -> str:
         score = 1
     return f"{score:.2f}"
 
+def _slugify_name(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "discovered-model"
+
+
+def _path_hash_suffix(path: str) -> str:
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
+    return digest[:8]
+
+
+def _adapter_from_external_kind(kind: str, path: str) -> tuple[str, bool]:
+    kind_l = kind.lower()
+    path_l = path.lower()
+    if path.startswith("ollama:") or kind_l in {"ollama", "ollama_blob"}:
+        return "ollama_py", True
+    if path_l.endswith(".gguf") or kind_l == "gguf":
+        return "llama_cpp", True
+    if kind_l in {"metadata_dir", "safetensors"} or "models--" in path_l:
+        return "transformers", True
+    if kind_l in {"weights", "bin"}:
+        return "generic", True
+    return "generic", False
+
+
+def _translate_external_record(item: dict[str, Any], used_names: set[str] | None = None) -> dict[str, str] | None:
+    name = str(item.get("Name", "")).strip()
+    path = str(item.get("Path", "")).strip()
+    kind = str(item.get("Kind", "")).strip()
+    if not name or not path:
+        return None
+    detector = str(item.get("Detector", "external_scanner")).strip() or "external_scanner"
+    details = item.get("Details", {})
+    adapter, kind_supported = _adapter_from_external_kind(kind, path)
+    locator_model_id = ""
+    locator_path = path
+    if path.startswith("ollama:"):
+        locator_model_id = path.split(":", 1)[1]
+        locator_path = ""
+    import_module = {"llama_cpp": "llama_cpp", "transformers": "transformers", "ollama_py": "ollama"}.get(adapter)
+    module_ok = _module_available(import_module) if import_module else True
+    importable = "true" if module_ok else "false"
+    reason = ""
+    if not kind_supported:
+        importable = "false"
+        reason = f"unsupported_kind:{kind or 'unknown'}"
+    elif adapter not in _INFERENCE_DISPATCHABLE_ADAPTERS:
+        importable = "false"
+        reason = f"unsupported_kind:{kind or 'unknown'}"
+    elif importable == "false":
+        reason = f"{import_module}_not_importable" if import_module else "missing_runtime_requirements"
+    base = _slugify_name(name)
+    candidate = base
+    if used_names is not None and candidate in used_names:
+        candidate = f"{base}-{_path_hash_suffix(path)}"
+    if used_names is not None:
+        used_names.add(candidate)
+    entry = {
+        "name": candidate,
+        "display": f"{name} ({kind or 'unknown'})",
+        "adapter": adapter,
+        "importable": importable,
+        "reason_unusable": reason,
+        "source": "windows_powershell_external",
+        "source_detail": detector,
+        "kind": kind,
+        "confidence": _as_confidence(item.get("Confidence", 0.5)),
+        "size_gb": str(item.get("SizeGB", "")),
+        "details": json.dumps(details, sort_keys=True) if isinstance(details, (dict, list)) else str(details),
+    }
+    if locator_model_id:
+        entry["model_id"] = locator_model_id
+    else:
+        entry["path"] = locator_path
+    return entry
+
+
+def _load_external_discovery_results() -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {"source": "windows_powershell_external", "count": 0, "searched_paths": [], "error": ""}
+    if platform.system().lower() != "windows":
+        diagnostics["error"] = "not_windows"
+        return {"models": [], "diagnostics": diagnostics}
+    script = ROOT / "scripts" / "Find-Any-Local-LLM-Models.ps1"
+    if not script.exists():
+        diagnostics["error"] = "script_missing"
+        return {"models": [], "diagnostics": diagnostics}
+    cmd = [os.getenv("ANTENNAMAP_POWERSHELL_BIN", "powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-EmitJson"]
+    if _env_flag("ANTENNAMAP_DISCOVERY_DEEP_SCAN", False):
+        cmd.append("-DeepScan")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_windows_script_timeout_seconds(), check=False)
+    except subprocess.TimeoutExpired:
+        diagnostics["error"] = "timeout"
+        return {"models": [], "diagnostics": diagnostics}
+    except OSError as exc:
+        diagnostics["error"] = f"invoke_error:{exc}"
+        return {"models": [], "diagnostics": diagnostics}
+    if proc.returncode != 0:
+        diagnostics["error"] = f"exit_{proc.returncode}"
+        return {"models": [], "diagnostics": diagnostics}
+    try:
+        records = json.loads(proc.stdout.strip() or "[]")
+    except json.JSONDecodeError:
+        diagnostics["error"] = "invalid_json"
+        return {"models": [], "diagnostics": diagnostics}
+    used_names: set[str] = set()
+    out: list[dict[str, str]] = []
+    for item in records if isinstance(records, list) else []:
+        if not isinstance(item, dict):
+            continue
+        translated = _translate_external_record(item, used_names=used_names)
+        if translated:
+            out.append(translated)
+    diagnostics["count"] = len(out)
+    return {"models": out, "diagnostics": diagnostics}
 
 def _map_windows_script_findings(payload: dict[str, Any]) -> list[dict[str, str]]:
     findings = payload.get("findings", []) if isinstance(payload, dict) else []
@@ -367,16 +482,24 @@ def _merge_models_preserve_first_runnable(models: list[dict[str, str]]) -> list[
         normalized = _normalize_entry(m)
         if not normalized.get("name"):
             continue
-        stable_key = f"{normalized.get('name','')}|{normalized.get('path', normalized.get('model_id',''))}"
-        if stable_key not in key_to_idx:
-            key_to_idx[stable_key] = len(merged)
+        canonical_locator = normalized.get("path", "").strip().lower() or normalized.get("model_id", "").strip().lower()
+        name_key = normalized.get("name", "").strip().lower()
+        stable_keys = [f"locator:{canonical_locator}"] if canonical_locator else []
+        stable_keys.append(f"name:{name_key}")
+        existing_idx = next((key_to_idx[k] for k in stable_keys if k in key_to_idx), None)
+        if existing_idx is None:
+            idx = len(merged)
             merged.append(normalized)
+            for key in stable_keys:
+                key_to_idx[key] = idx
             continue
-        current = merged[key_to_idx[stable_key]]
+        current = merged[existing_idx]
         current_runnable = current.get("importable") == "true" and not current.get("reason_unusable")
         incoming_runnable = normalized.get("importable") == "true" and not normalized.get("reason_unusable")
         if (not current_runnable) and incoming_runnable:
-            merged[key_to_idx[stable_key]] = normalized
+            merged[existing_idx] = normalized
+        for key in stable_keys:
+            key_to_idx[key] = existing_idx
     return merged
 
 def discover_models_detailed() -> list[dict[str, str]]:
@@ -398,7 +521,7 @@ def discover_models_with_metadata() -> dict[str, Any]:
     if tri: models.append(tri); sources["triangulation"] = 1
 
     if _env_flag("ANTENNAMAP_DISCOVERY_USE_POWERSHELL", False):
-        win = _discover_windows_with_script()
+        win = _load_external_discovery_results()
         win_models = win.get("models", [])
         models.extend(win_models)
         sources["windows_powershell"] = len(win_models)
@@ -421,6 +544,9 @@ def discover_models_with_metadata() -> dict[str, Any]:
         "hf_cache_paths": [str(p) for p in _hf_cache_roots()],
         "source_counts": sources,
         "discovery_sources": diagnostics,
+        "external_source_used": diagnostics.get("windows_powershell", {}).get("enabled", False),
+        "external_entries_total": sources.get("windows_powershell", 0),
+        "external_entries_runnable": sum(1 for m in unique if m.get("source") == "windows_powershell_external" and m.get("importable") == "true" and not m.get("reason_unusable")),
     }
 
 def discover_python_local_models() -> list[str]:

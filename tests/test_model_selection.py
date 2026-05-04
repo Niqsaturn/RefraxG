@@ -106,6 +106,24 @@ def test_map_windows_script_findings_to_normalized(monkeypatch):
     assert out[0]["importable"] == "true"
     assert out[1]["adapter"] == "transformers"
 
+def test_translate_external_record_to_normalized(monkeypatch):
+    monkeypatch.setattr(py_local, "_module_available", lambda m: m == "llama_cpp")
+    record = {
+        "Name": "Llama 3 8B",
+        "Path": "C:/models/llama3.gguf",
+        "Kind": "gguf",
+        "Confidence": 0.93,
+        "Detector": "extension_scan",
+        "SizeGB": 4.2,
+        "Details": {"x": 1},
+    }
+    out = py_local._translate_external_record(record, used_names=set())
+    assert out is not None
+    assert out["name"] == "llama-3-8b"
+    assert out["adapter"] == "llama_cpp"
+    assert out["importable"] == "true"
+    assert out["display"] == "Llama 3 8B (gguf)"
+
 
 def test_merge_models_dedup_prefers_first_runnable():
     merged = py_local._merge_models_preserve_first_runnable([
@@ -115,6 +133,26 @@ def test_merge_models_dedup_prefers_first_runnable():
     ])
     assert len(merged) == 2
     assert merged[0]["importable"] == "true"
+
+def test_merge_models_dedup_by_canonical_path_then_name():
+    merged = py_local._merge_models_preserve_first_runnable([
+        {"name": "alpha", "path": "C:/MODELS/A.GGUF", "adapter": "llama_cpp", "importable": "false", "reason_unusable": "llama_cpp_not_importable"},
+        {"name": "beta", "path": "c:/models/a.gguf", "adapter": "llama_cpp", "importable": "true"},
+        {"name": "gamma", "path": "c:/models/b.gguf", "adapter": "llama_cpp", "importable": "false", "reason_unusable": "llama_cpp_not_importable"},
+    ])
+    assert len(merged) == 2
+    assert merged[0]["importable"] == "true"
+    assert merged[0]["name"] == "beta"
+
+
+def test_unsupported_kind_maps_reason_unusable():
+    out = py_local._translate_external_record(
+        {"Name": "x", "Path": "C:/models/x.unknown", "Kind": "unknown_kind", "Confidence": 0.2, "Detector": "x", "SizeGB": 1, "Details": {}},
+        used_names=set(),
+    )
+    assert out is not None
+    assert out["importable"] == "false"
+    assert out["reason_unusable"] == "unsupported_kind:unknown_kind"
 
 
 def test_windows_script_timeout_failure_does_not_crash(monkeypatch):
