@@ -128,6 +128,7 @@ if (basemapModeSelect) {
 let sortedTimes = [];
 let sourcesInitialized = false;
 let selectedModel = '';
+const MODEL_STORAGE_KEY = 'antennamap.selectedModel';
 let _lastLoopMetrics = null;
 function currentBasemapMode() {
   try {
@@ -341,7 +342,16 @@ async function populateModelDropdown() {
       options.push({ value: '', label: '— No local Python LLMs detected —', disabled: true });
     }
     modelDropdown.innerHTML = options.map((o) => `<option value="${o.value}" ${o.disabled ? 'disabled' : ''}>${o.label}</option>`).join('');
+    const stored = (() => { try { return localStorage.getItem(MODEL_STORAGE_KEY) || ''; } catch (_) { return ''; } })();
     if (selectedModel) modelDropdown.value = selectedModel;
+    else if (stored) modelDropdown.value = stored;
+    else {
+      const bundledQwen = detailed.find((entry) => entry.name === 'qwen3.5-4b-bundled' && entry.importable === 'true' && !entry.reason_unusable);
+      if (bundledQwen) {
+        modelDropdown.value = `python_local/${bundledQwen.name}`;
+        await applyModelSelection(modelDropdown.value);
+      }
+    }
   } catch (_) {
     if (modelDropdown) modelDropdown.innerHTML = '<option value="">— unavailable —</option>';
   }
@@ -349,6 +359,7 @@ async function populateModelDropdown() {
 
 async function applyModelSelection(value) {
   selectedModel = value;
+  try { localStorage.setItem(MODEL_STORAGE_KEY, value); } catch (_) {}
   if (!value) return;
   const [provider, ...rest] = value.split('/');
   const model = rest.join('/') || 'baseline-v1';
@@ -363,7 +374,7 @@ async function applyModelSelection(value) {
     try {
       const body = await resp.json();
       const detail = body?.detail || {};
-      if (detail.error_code) message = `Model apply failed (${detail.error_code}): ${detail.error || detail.message || 'Unknown error'}`;
+      if (detail.error_code) message = `Model apply failed (${detail.error_code}): ${detail.error || detail.message || 'Unknown error'}. Check /api/models/discover for reason_unusable and dependencies.`;
       else if (body?.detail) message = `Model apply failed: ${body.detail}`;
     } catch (_) {
       const bodyText = await resp.text();
