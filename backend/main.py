@@ -1914,6 +1914,8 @@ async def _capture_loop() -> None:
         pass
     # Auto-start analysis loop using any locally installed Python LLM (or triangulation baseline)
     try:
+        from backend.model_providers.python_local import validate_discovered_adapters
+        validate_discovered_adapters()
         py_models = discover_python_local_models()
         provider = "python_local"
         model = py_models[0] if py_models else "triangulation-baseline"

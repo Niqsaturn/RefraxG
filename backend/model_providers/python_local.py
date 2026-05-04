@@ -38,6 +38,27 @@ _KNOWN_PACKAGES: list[tuple[re.Pattern, str, str, str]] = [
     (re.compile(r"^phi[_-]?",               re.I), "phi",            "Phi",              "generic"),
 ]
 
+
+_ADAPTER_ALIASES: dict[str, str] = {
+    "mistral": "generic",
+    "phi": "generic",
+    "openllm": "openllm",
+}
+
+_RUNNABLE_ADAPTERS: set[str] = {
+    "llama_cpp",
+    "gpt4all",
+    "transformers",
+    "qwen",
+    "ctransformers",
+    "mlx_lm",
+    "ollama_py",
+    "openllm",
+    "generic",
+    "custom",
+    "triangulation",
+}
+
 # ---------------------------------------------------------------------------
 # Package scanning
 # ---------------------------------------------------------------------------
@@ -138,6 +159,35 @@ def _load_registry() -> list[dict[str, str]]:
         return []
 
 
+
+def _normalize_adapter_key(adapter: str) -> str:
+    return _ADAPTER_ALIASES.get(adapter, adapter)
+
+
+def _resolve_adapter(entry: dict[str, str]) -> tuple[str, str | None]:
+    adapter = _normalize_adapter_key(entry.get("adapter", "custom"))
+    module = entry.get("module", "")
+    if adapter == "openllm":
+        if not module:
+            module = "openllm"
+            entry["module"] = module
+        if not _module_available(module):
+            return adapter, f"{module}_not_importable"
+    if adapter not in _RUNNABLE_ADAPTERS:
+        return adapter, f"unsupported_adapter:{adapter}"
+    return adapter, None
+
+
+def validate_discovered_adapters(models: list[dict[str, str]] | None = None) -> list[tuple[str, str]]:
+    models = models if models is not None else discover_models_detailed()
+    mismatches: list[tuple[str, str]] = []
+    for model in models:
+        if _normalize_adapter_key(model.get("adapter", "custom")) not in _RUNNABLE_ADAPTERS:
+            mismatches.append((model.get("name", ""), model.get("adapter", "")))
+    if mismatches:
+        _log.warning("Discovered adapter keys are not runnable: %s", mismatches)
+    return mismatches
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -147,11 +197,17 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, str]:
     normalized.setdefault("name", "")
     normalized.setdefault("display", normalized["name"])
     normalized.setdefault("adapter", "custom")
+    normalized["adapter"] = _normalize_adapter_key(normalized["adapter"])
     normalized.setdefault("importable", "false")
     if normalized.get("importable") not in ("true", "false"):
         normalized["importable"] = "false"
     if normalized["importable"] == "false" and not normalized.get("reason_unusable"):
         normalized["reason_unusable"] = "missing_runtime_requirements"
+    adapter, adapter_reason = _resolve_adapter(normalized)
+    normalized["adapter"] = adapter
+    if adapter_reason:
+        normalized["importable"] = "false"
+        normalized["reason_unusable"] = adapter_reason
     has_locator = bool(normalized.get("path") or normalized.get("model_id"))
     if normalized.get("adapter") in ("triangulation", "generic") and not has_locator:
         has_locator = True
@@ -269,7 +325,7 @@ def _module_available(module: str) -> bool:
 
 def run_llm_inference(model_entry: dict[str, str], prompt: str, system_prompt: str = "") -> str:
     """Dispatch inference to the appropriate adapter based on model_entry['adapter']."""
-    adapter = model_entry.get("adapter", "generic")
+    adapter = _normalize_adapter_key(model_entry.get("adapter", "generic"))
 
     if adapter == "llama_cpp":
         return _infer_llama_cpp(model_entry, prompt, system_prompt)
@@ -285,7 +341,9 @@ def run_llm_inference(model_entry: dict[str, str], prompt: str, system_prompt: s
         return _infer_mlx_lm(model_entry, prompt, system_prompt)
     if adapter == "ollama_py":
         return _infer_ollama_py(model_entry, prompt, system_prompt)
-    if adapter in ("generic", "custom", "mistral", "phi"):
+    if adapter == "openllm":
+        return _infer_openllm(model_entry, prompt, system_prompt)
+    if adapter in ("generic", "custom"):
         return _infer_generic(model_entry, prompt, system_prompt)
     raise RuntimeError(f"No adapter for: {adapter}")
 
@@ -397,6 +455,36 @@ def _infer_ollama_py(entry: dict, prompt: str, system: str) -> str:
     messages.append({"role": "user", "content": prompt})
     resp = ollama.chat(model=model_id, messages=messages)
     return resp["message"]["content"]
+
+
+def _infer_openllm(entry: dict, prompt: str, system: str) -> str:
+    """Use OpenLLM client APIs when available, with generic fallback."""
+    try:
+        import openllm  # type: ignore[import]
+    except ImportError as exc:
+        raise RuntimeError(f"Cannot import openllm: {exc}") from exc
+
+    model_id = entry.get("model_id") or entry.get("name", "")
+    full_prompt = f"{system}\n\n{prompt}" if system else prompt
+
+    if hasattr(openllm, "LLM"):
+        try:
+            llm = openllm.LLM(model_id) if model_id else openllm.LLM()
+            for method in ("generate", "__call__"):
+                if callable(getattr(llm, method, None)):
+                    return str(getattr(llm, method)(full_prompt))
+        except Exception as exc:
+            _log.debug("OpenLLM LLM path failed: %s", exc)
+
+    if hasattr(openllm, "client"):
+        try:
+            client = openllm.client.HTTPClient()
+            if hasattr(client, "generate"):
+                return str(client.generate(full_prompt))
+        except Exception as exc:
+            _log.debug("OpenLLM client path failed: %s", exc)
+
+    return _infer_generic(entry, prompt, system)
 
 
 def _infer_generic(entry: dict, prompt: str, system: str) -> str:
