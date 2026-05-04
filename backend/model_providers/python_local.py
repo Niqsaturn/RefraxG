@@ -236,6 +236,18 @@ def _windows_script_timeout_seconds() -> float:
         return 15.0
 
 
+def _as_confidence(value: Any, default: float = 0.5) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = default
+    if score < 0:
+        score = 0
+    if score > 1:
+        score = 1
+    return f"{score:.2f}"
+
+
 def _map_windows_script_findings(payload: dict[str, Any]) -> list[dict[str, str]]:
     findings = payload.get("findings", []) if isinstance(payload, dict) else []
     models: list[dict[str, str]] = []
@@ -276,9 +288,10 @@ def _map_windows_script_findings(payload: dict[str, Any]) -> list[dict[str, str]
             "adapter": adapter,
             "importable": importable,
             "reason_unusable": reason,
-            "detector": detector,
+            "source": "windows_powershell",
+            "source_detail": detector or "powershell",
             "kind": kind,
-            "confidence": confidence,
+            "confidence": _as_confidence(confidence),
             "details": json.dumps(details, sort_keys=True) if isinstance(details, (dict, list)) else str(details),
         }
         if model_id:
@@ -298,7 +311,8 @@ def _discover_windows_with_script() -> dict[str, Any]:
     if not script.exists():
         diagnostics["error"] = "script_missing"
         return {"models": [], "diagnostics": diagnostics}
-    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-EmitJson"]
+    shell_cmd = os.getenv("ANTENNAMAP_POWERSHELL_BIN", "powershell")
+    cmd = [shell_cmd, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-EmitJson"]
     if _env_flag("ANTENNAMAP_DISCOVERY_DEEP_SCAN", False):
         cmd.append("-DeepScan")
     try:
@@ -397,6 +411,7 @@ _MODEL_EXTENSIONS = (".gguf", ".bin", ".safetensors")
 
 def _configured_search_roots() -> list[Path]:
     defaults = [Path("/workspace"), Path.home(), ROOT, Path("/models"), Path("/opt/models")]
+    defaults.extend(_env_cache_roots())
     configured: list[str] = []
     raw_env = os.getenv("ANTENNAMAP_MODEL_SEARCH_PATHS", "")
     if raw_env.strip():
@@ -471,13 +486,33 @@ def _find_hf_cache() -> list[dict[str, str]]:
     return found
 
 
-def _hf_cache_roots() -> list[Path]:
+def _env_cache_roots() -> list[Path]:
     candidates = [
         os.getenv("HUGGINGFACE_HUB_CACHE", ""),
         os.getenv("TRANSFORMERS_CACHE", ""),
         os.getenv("HF_HOME", ""),
-        str(Path.home() / ".cache" / "huggingface" / "hub"),
+        os.getenv("OLLAMA_MODELS", ""),
+        os.getenv("GPT4ALL_MODEL_PATH", ""),
+        os.getenv("LLAMA_CPP_MODELS", ""),
+        os.getenv("XDG_CACHE_HOME", ""),
     ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if candidate == os.getenv("HF_HOME", "") and path.name != "hub":
+            path = path / "hub"
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            roots.append(path)
+    return roots
+
+
+def _hf_cache_roots() -> list[Path]:
+    candidates = [str(p) for p in _env_cache_roots()] + [str(Path.home() / ".cache" / "huggingface" / "hub")]
     roots: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:

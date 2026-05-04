@@ -134,3 +134,36 @@ def test_windows_script_timeout_failure_does_not_crash(monkeypatch):
     payload = py_local.discover_models_with_metadata()
     assert payload["models"] == []
     assert payload["discovery_sources"]["windows_powershell"]["error"] == "timeout"
+
+
+def test_env_cache_roots_are_included_in_search(monkeypatch, tmp_path):
+    ollama = tmp_path / "ollama_models"
+    ollama.mkdir()
+    monkeypatch.setenv("OLLAMA_MODELS", str(ollama))
+    roots = py_local._configured_search_roots()
+    assert any(str(r) == str(ollama) for r in roots)
+
+
+def test_discovery_paths_can_be_overridden(monkeypatch, tmp_path):
+    only = tmp_path / "only_here"
+    only.mkdir()
+    (only / "alpha.gguf").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("ANTENNAMAP_MODEL_SEARCH_PATHS", str(only))
+    monkeypatch.setattr(py_local, "_module_available", lambda m: m == "llama_cpp")
+    monkeypatch.setattr(py_local, "_load_registry", lambda: [])
+    monkeypatch.setattr(py_local, "scan_installed_llm_packages", lambda: [])
+    monkeypatch.setattr(py_local, "_find_hf_cache", lambda: [])
+    monkeypatch.setattr(py_local, "_find_triangulation_model", lambda: None)
+    payload = py_local.discover_models_with_metadata()
+    assert any(m.get("path", "").endswith("alpha.gguf") for m in payload["models"])
+    assert str(only) in payload["searched_paths"]
+
+
+def test_merge_preserves_source_and_confidence_fields():
+    merged = py_local._merge_models_preserve_first_runnable([
+        {"name": "z", "path": "/m.gguf", "adapter": "llama_cpp", "importable": "false", "reason_unusable": "llama_cpp_not_importable", "source": "filesystem", "confidence": "0.40"},
+        {"name": "z", "path": "/m.gguf", "adapter": "llama_cpp", "importable": "true", "source": "windows_powershell", "confidence": "0.90"},
+    ])
+    assert merged[0]["importable"] == "true"
+    assert merged[0]["source"] == "windows_powershell"
+    assert merged[0]["confidence"] == "0.90"
