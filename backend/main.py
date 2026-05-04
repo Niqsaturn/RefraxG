@@ -822,11 +822,14 @@ def discover_python_local_models() -> list[str]:
 
 
 def discover_available_models() -> dict[str, Any]:
-    from backend.model_providers.python_local import discover_models_detailed
-    py_models = discover_models_detailed()
+    from backend.model_providers.python_local import discover_models_with_metadata
+    discovery = discover_models_with_metadata()
+    py_models = discovery["models"]
     return {
         "python_local": [m["name"] for m in py_models],
         "python_local_detailed": py_models,
+        "searched_paths": discovery.get("searched_paths", []),
+        "source_counts": discovery.get("source_counts", {}),
         "runnable_count": sum(1 for m in py_models if m.get("importable") == "true" and (m.get("path") or m.get("model_id") or m.get("adapter") in ("triangulation", "generic"))),
         "unusable_count": sum(1 for m in py_models if m.get("importable") != "true" or m.get("reason_unusable")),
     }
