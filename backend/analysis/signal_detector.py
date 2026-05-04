@@ -123,6 +123,8 @@ def _call_python_llm(model_name: str, user_prompt: str) -> str:
     entry = next((m for m in models if m["name"] == model_name), None)
     if entry is None:
         raise RuntimeError(f"Model '{model_name}' not found in installed Python packages")
+    if entry.get("importable") != "true" or entry.get("reason_unusable"):
+        raise RuntimeError(f"Model '{model_name}' unavailable: {entry.get('reason_unusable', 'missing_runtime_requirements')}")
     return run_llm_inference(entry, user_prompt, system_prompt=_SYSTEM_PROMPT)
 
 
@@ -310,7 +312,6 @@ def detect_signals(
         except Exception as exc:
             _log.warning("Python LLM inference failed (%s): %s", model, exc)
             return DetectionResult(error=f"LLM inference failed: {exc}")
-
     # triangulation-baseline or no model selected → rule-based
     return _python_local_detections(samples, operator_lat, operator_lon)
 
