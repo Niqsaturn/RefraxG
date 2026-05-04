@@ -167,3 +167,29 @@ def test_merge_preserves_source_and_confidence_fields():
     assert merged[0]["importable"] == "true"
     assert merged[0]["source"] == "windows_powershell"
     assert merged[0]["confidence"] == "0.90"
+
+def test_metadata_folders_are_detected_as_models(monkeypatch, tmp_path):
+    model_dir = tmp_path / "meta_model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(py_local, "_module_available", lambda m: m == "transformers")
+    out = py_local._find_model_files([tmp_path])
+    hit = next((m for m in out if m.get("path") == str(model_dir)), None)
+    assert hit is not None
+    assert hit["adapter"] == "transformers"
+    assert hit["importable"] == "true"
+
+
+def test_discovery_exposes_search_root_metadata(monkeypatch, tmp_path):
+    cache_root = tmp_path / "ollama"
+    cache_root.mkdir()
+    monkeypatch.setenv("OLLAMA_MODELS", str(cache_root))
+    monkeypatch.setattr(py_local, "_load_registry", lambda: [])
+    monkeypatch.setattr(py_local, "scan_installed_llm_packages", lambda: [])
+    monkeypatch.setattr(py_local, "_find_model_files", lambda roots: [])
+    monkeypatch.setattr(py_local, "_find_hf_cache", lambda: [])
+    monkeypatch.setattr(py_local, "_find_triangulation_model", lambda: None)
+    payload = py_local.discover_models_with_metadata()
+    assert str(cache_root) in payload["env_cache_paths"]
+    assert str(cache_root) in payload["search_roots"]
