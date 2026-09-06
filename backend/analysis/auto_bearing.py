@@ -64,6 +64,16 @@ def compute_auto_bearing(
     )
 
 
+def compute_array_motion_bearing(node_obs: list[dict], freq_hz: float) -> dict[str, float | str]:
+    """Return bearing + calibrated uncertainty contract for per-frame fusion."""
+    result = compute_auto_bearing(node_obs=node_obs, freq_hz=freq_hz)
+    return {
+        "bearing_deg": float(result.bearing_deg),
+        "sigma_deg": float(result.sigma_deg),
+        "method": result.method,
+    }
+
+
 def _rssi_gradient_bearing(nodes: list[dict]) -> AutoBearingResult:
     """Estimate bearing using weighted RSSI gradient across ≥3 nodes.
 

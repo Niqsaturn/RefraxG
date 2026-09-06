@@ -99,3 +99,30 @@ def estimate_bearing(
         movement_geometry=1.0,   # movement geometry handled externally
     )
     return round(bearing_deg, 2), sigma
+
+
+def estimate_array_bearing_with_uncertainty(frame: dict) -> dict[str, float | str]:
+    """Expose uncertainty-calibrated bearing for a single frame.
+
+    Expected keys (best effort):
+    - array_motion_bearing_deg / bearing_deg
+    - snr_db
+    - frequency_hz or freq_hz
+    - bandwidth_hz
+    - sdr_type
+    - movement_geometry (0..1)
+    """
+    bearing = float(frame.get("array_motion_bearing_deg", frame.get("bearing_deg", 0.0)) or 0.0)
+    freq_hz = float(frame.get("frequency_hz") or frame.get("freq_hz") or 100e6)
+    sigma = bearing_uncertainty_deg(
+        snr_db=float(frame.get("snr_db", 0.0)),
+        freq_mhz=freq_hz / 1e6,
+        bandwidth_hz=float(frame.get("bandwidth_hz", 0.0) or 0.0),
+        sdr_type=str(frame.get("sdr_type", "default")),
+        movement_geometry=float(frame.get("movement_geometry", 0.7) or 0.7),
+    )
+    return {
+        "bearing_deg": round(bearing % 360.0, 2),
+        "sigma_deg": float(sigma),
+        "method": "array_motion_geometry",
+    }
