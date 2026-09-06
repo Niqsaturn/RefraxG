@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from statistics import mean, pstdev
 
 
 @dataclass
@@ -19,6 +20,17 @@ class SpectralPeak:
     modulation_hint: str   # "CW"|"SSB"|"AM"|"FM"|"WBFM"|"data"|"unknown"
     bin_index: int         # index in original PSD array
 
+
+
+
+@dataclass
+class InterferenceSignature:
+    occupied_bandwidth_hz: float
+    spur_spacing_hz: float
+    spectral_flatness: float
+    kurtosis: float
+    burst_rate_hz: float
+    duty_cycle: float
 
 def _noise_floor(psd_bins_db: list[float], noise_figure_db: float) -> float:
     """Bottom 5th-percentile mean of PSD bins + NF correction.
@@ -144,3 +156,46 @@ def freq_hopping_detected(peaks: list[SpectralPeak], sample_rate_hz: float) -> b
     powers = [p.peak_dbm for p in peaks]
     power_spread = max(powers) - min(powers)
     return power_spread < 15.0   # similar power levels (within 15 dB)
+
+
+def extract_interference_signature(psd_bins_db: list[float], sample_rate_hz: float) -> InterferenceSignature:
+    """Extract compact interference features from a PSD frame."""
+    if not psd_bins_db or sample_rate_hz <= 0:
+        return InterferenceSignature(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    n = len(psd_bins_db)
+    bin_hz = sample_rate_hz / max(n, 1)
+    floor = _noise_floor(psd_bins_db, noise_figure_db=0.0)
+    threshold = floor + 6.0
+
+    occupied_bins = [i for i, v in enumerate(psd_bins_db) if v >= threshold]
+    occupied_bandwidth_hz = len(occupied_bins) * bin_hz
+
+    local_peaks = [i for i in range(1, n - 1) if psd_bins_db[i] > psd_bins_db[i - 1] and psd_bins_db[i] >= psd_bins_db[i + 1] and psd_bins_db[i] >= threshold]
+    spur_spacing_hz = 0.0
+    if len(local_peaks) >= 2:
+        deltas = [(local_peaks[i] - local_peaks[i - 1]) * bin_hz for i in range(1, len(local_peaks))]
+        spur_spacing_hz = mean(deltas)
+
+    linear = [10 ** (v / 10.0) for v in psd_bins_db]
+    gmean = math.exp(sum(math.log(max(x, 1e-20)) for x in linear) / n)
+    amean = sum(linear) / n
+    spectral_flatness = gmean / max(amean, 1e-20)
+
+    mu = mean(psd_bins_db)
+    var = sum((x - mu) ** 2 for x in psd_bins_db) / n
+    kurtosis = 0.0 if var <= 1e-12 else (sum((x - mu) ** 4 for x in psd_bins_db) / n) / (var ** 2)
+
+    active = [1 if v >= threshold else 0 for v in psd_bins_db]
+    rising_edges = sum(1 for i in range(1, n) if active[i] == 1 and active[i - 1] == 0)
+    burst_rate_hz = rising_edges * (sample_rate_hz / n)
+    duty_cycle = sum(active) / n
+
+    return InterferenceSignature(
+        occupied_bandwidth_hz=round(occupied_bandwidth_hz, 2),
+        spur_spacing_hz=round(spur_spacing_hz, 2),
+        spectral_flatness=round(spectral_flatness, 6),
+        kurtosis=round(kurtosis, 6),
+        burst_rate_hz=round(burst_rate_hz, 6),
+        duty_cycle=round(duty_cycle, 6),
+    )
