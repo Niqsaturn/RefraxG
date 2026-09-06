@@ -144,3 +144,43 @@ def freq_hopping_detected(peaks: list[SpectralPeak], sample_rate_hz: float) -> b
     powers = [p.peak_dbm for p in peaks]
     power_spread = max(powers) - min(powers)
     return power_spread < 15.0   # similar power levels (within 15 dB)
+
+
+@dataclass
+class AssociatedAnomaly:
+    """Anomaly linked to a candidate bearing with uncertainty."""
+    anomaly: dict
+    bearing_deg: float
+    sigma_deg: float
+
+
+def associate_anomalies_to_bearings(anomalies: list[dict], samples: list[dict], default_sigma_deg: float = 20.0) -> list[AssociatedAnomaly]:
+    """Attach nearest-in-time bearing candidate to each anomaly.
+
+    Falls back to heading when explicit bearing is unavailable.
+    """
+    if not anomalies or not samples:
+        return []
+    out: list[AssociatedAnomaly] = []
+    for an in anomalies:
+        freq = an.get("freq_hz") or an.get("frequency_hz")
+        best = None
+        best_score = -1e9
+        for s in samples:
+            b = s.get("bearing_deg", s.get("heading_deg"))
+            if b is None or s.get("lat") is None or s.get("lon") is None:
+                continue
+            snr = float(s.get("snr_db", 0.0))
+            sfreq = s.get("frequency_hz") or s.get("freq_hz")
+            freq_penalty = 0.0
+            if freq and sfreq:
+                freq_penalty = abs(float(freq) - float(sfreq)) / 1e6
+            score = snr - freq_penalty
+            if score > best_score:
+                best_score = score
+                best = s
+        if best is None:
+            continue
+        sigma = max(3.0, default_sigma_deg - min(15.0, float(best.get("snr_db", 0.0)) * 0.6))
+        out.append(AssociatedAnomaly(anomaly=an, bearing_deg=float(best.get("bearing_deg", best.get("heading_deg", 0.0))), sigma_deg=round(sigma,2)))
+    return out
