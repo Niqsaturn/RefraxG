@@ -39,11 +39,34 @@ jobs:
           gzip -dc v1.2.patch.gz > v1.2.patch
           patch -p1 < v1.2.patch
           grep -q 'versionName = "1.2.0"' WaveFieldScanner/app/build.gradle.kts
-          test -f WaveFieldScanner/app/src/main/java/com/wavefield/scanner/StaticProbeImager.java
-          test -f WaveFieldScanner/app/src/main/java/com/wavefield/scanner/StaticReconstructionView.java
+      - name: Apply verified v1.3 Active Field Illumination patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/blobs/8efce6e4a94f2961adec35875e796e3d732094c8" \
+            | python3 -c 'import sys,json,base64; d=json.load(sys.stdin); sys.stdout.buffer.write(base64.b64decode(d["content"]))' \
+            > v1.3.patch.gz
+          echo '9e7efa8d0ae2f212671ebb7a80cca8fc593570217dad024c5430d8d49b785041  v1.3.patch.gz' | sha256sum -c -
+          gzip -dc v1.3.patch.gz > v1.3.patch
+          patch -p1 < v1.3.patch
+          grep -q 'versionName = "1.3.0"' WaveFieldScanner/app/build.gradle.kts
+          test -f WaveFieldScanner/app/src/main/java/com/wavefield/scanner/ExternalIlluminatorSignal.java
+          test -f WaveFieldScanner/app/src/main/java/com/wavefield/scanner/ExternalIlluminatorAnalyzer.java
           cd WaveFieldScanner
           ACTUAL=$(find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
-          test "$ACTUAL" = '10c1962d027b97ef77a9840e0b4e0e300636cdfced58dd7ddb8072ca0b5cee3d'
+          test "$ACTUAL" = 'd6fca6ccdfb592e6f48604f043632592b6005a5ce3b1ea7d68dcf7d109f60b8f'
+      - name: Run external illuminator numerical harness
+        run: |
+          mkdir -p harness-out
+          javac -d harness-out \
+            WaveFieldScanner/app/src/main/java/com/wavefield/scanner/SignalProcessor.java \
+            WaveFieldScanner/app/src/main/java/com/wavefield/scanner/ExternalIlluminatorSignal.java \
+            WaveFieldScanner/app/src/main/java/com/wavefield/scanner/StaticProbeImager.java \
+            WaveFieldScanner/tools/ExternalIlluminatorHarness.java
+          java -cp harness-out ExternalIlluminatorHarness WaveFieldScanner-ExternalIlluminator-30s.wav
       - name: Ensure Android API 35
         run: |
           SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
@@ -53,14 +76,17 @@ jobs:
       - name: Build APK
         working-directory: WaveFieldScanner
         run: gradle --no-daemon clean assembleDebug
-      - name: Prepare APK
+      - name: Prepare APK and speaker WAV
         run: |
-          cp WaveFieldScanner/app/build/outputs/apk/debug/app-debug.apk WaveFieldScanner-S10-v1.2.0.apk
-          sha256sum WaveFieldScanner-S10-v1.2.0.apk > WaveFieldScanner-S10-v1.2.0.apk.sha256
+          cp WaveFieldScanner/app/build/outputs/apk/debug/app-debug.apk WaveFieldScanner-S10-v1.3.0.apk
+          sha256sum WaveFieldScanner-S10-v1.3.0.apk > WaveFieldScanner-S10-v1.3.0.apk.sha256
+          sha256sum WaveFieldScanner-ExternalIlluminator-30s.wav > WaveFieldScanner-ExternalIlluminator-30s.wav.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: WaveFieldScanner-S10-v1.2.0
+          name: WaveFieldScanner-S10-v1.3.0
           path: |
-            WaveFieldScanner-S10-v1.2.0.apk
-            WaveFieldScanner-S10-v1.2.0.apk.sha256
+            WaveFieldScanner-S10-v1.3.0.apk
+            WaveFieldScanner-S10-v1.3.0.apk.sha256
+            WaveFieldScanner-ExternalIlluminator-30s.wav
+            WaveFieldScanner-ExternalIlluminator-30s.wav.sha256
           if-no-files-found: error
