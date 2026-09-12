@@ -4,7 +4,6 @@ on:
   push:
     branches: [wave-field-scanner-apk-build]
     paths:
-      - 'WaveFieldScanner_chunks/**'
       - '.github/workflows/wave-field-scanner-apk.yml'
   workflow_dispatch:
 
@@ -21,11 +20,30 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Reconstruct and verify source
+      - name: Reconstruct verified v1.1 base
         run: |
           cat WaveFieldScanner_chunks/part_*.b64 | tr -d '\n\r' | base64 -d > WaveFieldScanner_v1.1.0-source.rebuilt.zip
           echo 'ecb19f7e95d34be9ed587e763f32f86f50864dc50410f5013449344fb6203575  WaveFieldScanner_v1.1.0-source.rebuilt.zip' | sha256sum -c -
           unzip -q WaveFieldScanner_v1.1.0-source.rebuilt.zip
+      - name: Apply verified v1.2 Static Probe Imaging patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/blobs/bb2dad5b1b4824d1229df380470b7b9aa1e5e4b6" \
+            | python3 -c 'import sys,json,base64; d=json.load(sys.stdin); sys.stdout.buffer.write(base64.b64decode(d["content"]))' \
+            > v1.2.patch.gz
+          gzip -t v1.2.patch.gz
+          gzip -dc v1.2.patch.gz > v1.2.patch
+          patch -p1 < v1.2.patch
+          grep -q 'versionName = "1.2.0"' WaveFieldScanner/app/build.gradle.kts
+          test -f WaveFieldScanner/app/src/main/java/com/wavefield/scanner/StaticProbeImager.java
+          test -f WaveFieldScanner/app/src/main/java/com/wavefield/scanner/StaticReconstructionView.java
+          cd WaveFieldScanner
+          ACTUAL=$(find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          test "$ACTUAL" = '10c1962d027b97ef77a9840e0b4e0e300636cdfced58dd7ddb8072ca0b5cee3d'
       - name: Ensure Android API 35
         run: |
           SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
@@ -37,12 +55,12 @@ jobs:
         run: gradle --no-daemon clean assembleDebug
       - name: Prepare APK
         run: |
-          cp WaveFieldScanner/app/build/outputs/apk/debug/app-debug.apk WaveFieldScanner-S10-v1.1.0.apk
-          sha256sum WaveFieldScanner-S10-v1.1.0.apk > WaveFieldScanner-S10-v1.1.0.apk.sha256
+          cp WaveFieldScanner/app/build/outputs/apk/debug/app-debug.apk WaveFieldScanner-S10-v1.2.0.apk
+          sha256sum WaveFieldScanner-S10-v1.2.0.apk > WaveFieldScanner-S10-v1.2.0.apk.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: WaveFieldScanner-S10-v1.1.0
+          name: WaveFieldScanner-S10-v1.2.0
           path: |
-            WaveFieldScanner-S10-v1.1.0.apk
-            WaveFieldScanner-S10-v1.1.0.apk.sha256
+            WaveFieldScanner-S10-v1.2.0.apk
+            WaveFieldScanner-S10-v1.2.0.apk.sha256
           if-no-files-found: error
