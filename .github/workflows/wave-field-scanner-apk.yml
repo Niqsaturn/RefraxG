@@ -28,8 +28,10 @@ jobs:
           unzip -q WaveFieldScanner_v1.1.0-source.rebuilt.zip
       - name: Ensure Android API 35
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
       - name: Build APK
         working-directory: WaveFieldScanner
         run: gradle --no-daemon clean assembleDebug
