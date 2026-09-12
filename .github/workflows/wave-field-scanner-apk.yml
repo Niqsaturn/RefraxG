@@ -1,0 +1,43 @@
+name: Wave Field Scanner APK
+
+on:
+  push:
+    branches: [wave-field-scanner-apk-build]
+    paths:
+      - 'WaveFieldScanner_v1.1.0-source.zip'
+      - '.github/workflows/wave-field-scanner-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Unpack scanner source
+        run: unzip -q WaveFieldScanner_v1.1.0-source.zip
+      - name: Ensure Android API 35
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build and test
+        working-directory: WaveFieldScanner
+        run: gradle --no-daemon clean assembleDebug
+      - name: Prepare APK
+        run: |
+          cp WaveFieldScanner/app/build/outputs/apk/debug/app-debug.apk WaveFieldScanner-S10-v1.1.0.apk
+          sha256sum WaveFieldScanner-S10-v1.1.0.apk > WaveFieldScanner-S10-v1.1.0.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WaveFieldScanner-S10-v1.1.0
+          path: |
+            WaveFieldScanner-S10-v1.1.0.apk
+            WaveFieldScanner-S10-v1.1.0.apk.sha256
+          if-no-files-found: error
