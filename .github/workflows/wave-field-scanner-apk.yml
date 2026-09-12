@@ -4,7 +4,7 @@ on:
   push:
     branches: [wave-field-scanner-apk-build]
     paths:
-      - 'WaveFieldScanner_v1.1.0-source.zip'
+      - 'WaveFieldScanner_chunks/**'
       - '.github/workflows/wave-field-scanner-apk.yml'
   workflow_dispatch:
 
@@ -21,13 +21,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Unpack scanner source
-        run: unzip -q WaveFieldScanner_v1.1.0-source.zip
+      - name: Reconstruct and verify source
+        run: |
+          cat WaveFieldScanner_chunks/part_*.b64 | tr -d '\n\r' | base64 -d > WaveFieldScanner_v1.1.0-source.rebuilt.zip
+          echo 'ecb19f7e95d34be9ed587e763f32f86f50864dc50410f5013449344fb6203575  WaveFieldScanner_v1.1.0-source.rebuilt.zip' | sha256sum -c -
+          unzip -q WaveFieldScanner_v1.1.0-source.rebuilt.zip
       - name: Ensure Android API 35
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Build and test
+      - name: Build APK
         working-directory: WaveFieldScanner
         run: gradle --no-daemon clean assembleDebug
       - name: Prepare APK
