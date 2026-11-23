@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-.venv/
-backend/pipeline/data/
-backend/ingest/data/
-backend/storage/data/
-models/*.json
-*.db
