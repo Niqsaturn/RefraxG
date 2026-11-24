@@ -14,7 +14,7 @@
    node.textContent=online?"Observatory online":known?"Observatory unavailable":"Gateway online · checking core";
    node.dataset.state=online?"online":known?"offline":"unknown";
    node.title="Server health, independent of agent connectivity and scientific feed freshness.";
-  }catch{node.textContent="Server status unavailable";node.dataset.state="offline";}
+  }catch{node.textContent="Browser cannot reach API";node.dataset.state="unknown";node.title="The browser could not reach the endpoint; this is not proof that the server is stopped. Try the Full-screen observatory link. A tailnet browser may require its own local-network permission.";}
   finally{busy=false;}
  }
  check();setInterval(check,30000);document.addEventListener("visibilitychange",check);
