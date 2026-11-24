@@ -43,6 +43,7 @@ function init(){
  if(!window.maplibregl){setStatus("Map renderer unavailable.");return}
  map=new maplibregl.Map({container:"map",style:"https://tiles.openfreemap.org/styles/liberty",center:[0,15],zoom:1.4,pitch:0,maxPitch:75,attributionControl:true});
  map.addControl(new maplibregl.NavigationControl(),"top-right");
+ window.addEventListener("refrax:layout-change",()=>map.resize());
  map.on("load",()=>{
   const layers=map.getStyle().layers;
   const b=layers.find(l=>l["source-layer"]==="building");
