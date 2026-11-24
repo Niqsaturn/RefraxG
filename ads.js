@@ -1,5 +1,5 @@
 "use strict";
-// Load only the selected, visible ad sizes, after the visitor opts in.
+// Responsive visible ads load by default; isolate all third-party frames.
 (() => {
  const $=id=>document.getElementById(id);
  const sizes={
@@ -7,8 +7,8 @@
   "banner-300x250":[300,250],"banner-160x300":[160,300],"banner-160x600":[160,600],
   "native":[300,250],"extra-1":[300,300],"extra-2":[300,300]
  };
- let enabled=false,extra=null;
- try{enabled=localStorage.getItem("refrax-ad-consent")==="yes"}catch{}
+ let enabled=true,extra=null;
+ try{enabled=localStorage.getItem("refrax-ads-disabled")!=="yes"}catch{}
  const slots=["ad-top","ad-rail","ad-rectangle","ad-native","ad-extra"];
  const observer=new IntersectionObserver(entries=>{
   for(const entry of entries){
@@ -37,7 +37,7 @@
   if(unit)observer.observe(slot);
  }
  function layout(){
-  $("ads-choice").textContent=enabled?"Disable advertisements":"Allow advertisements";
+  $("ads-choice").textContent=enabled?"Hide advertisements":"Show advertisements";
   $("ads-choice").setAttribute("aria-pressed",String(enabled));
   $("sponsors").hidden=!enabled;
   const w=document.documentElement.clientWidth,h=window.innerHeight;
@@ -54,7 +54,7 @@
  $("ads-choice").addEventListener("click",()=>{
   enabled=!enabled;
   if(!enabled)extra=null;
-  try{localStorage.setItem("refrax-ad-consent",enabled?"yes":"no")}catch{}
+  try{localStorage.setItem("refrax-ads-disabled",enabled?"no":"yes")}catch{}
   layout();
  });
  for(const b of document.querySelectorAll("[data-ad-extra]"))b.addEventListener("click",()=>{extra=b.dataset.adExtra;layout()});
