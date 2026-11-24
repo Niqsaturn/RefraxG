@@ -44,11 +44,11 @@ No account is required by the application. Model data and map coverage depend on
 
 ### 1. Explore the interface
 
-When the website is deployed, open it in a current WebGL-capable browser. Alternatively, clone the release branch and serve its static files locally:
+When the website is deployed, open it in a current WebGL-capable browser. Alternatively, clone the repository and serve its static files locally:
 
 ~~~bash
-git clone --branch refrax-release https://github.com/Niqsaturn/AntennaMAP.git
-cd AntennaMAP
+git clone https://github.com/Niqsaturn/RefraxG.git
+cd RefraxG
 python -m http.server 8000 --bind 127.0.0.1
 ~~~
 
