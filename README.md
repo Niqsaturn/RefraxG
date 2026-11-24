@@ -6,7 +6,7 @@
 
 Global data · 3D geography · RF reference simulations · Local AI integration
 
-[Quick start](#quick-start) · [Features](#features) · [API](#api-reference) · [Agent integration](#connect-your-own-agent) · [Contributing](#contributing)
+[Live observatory](https://niqsaturn.github.io/RefraxG/) · [Quick start](#quick-start) · [Features](#features) · [API](#api-reference) · [Agent integration](#connect-your-own-agent) · [Contributing](#contributing)
 
 </div>
 
@@ -44,7 +44,7 @@ No account is required by the application. Model data and map coverage depend on
 
 ### 1. Explore the interface
 
-When the website is deployed, open it in a current WebGL-capable browser. Alternatively, clone the repository and serve its static files locally:
+Open the [live observatory](https://niqsaturn.github.io/RefraxG/) in a current WebGL-capable browser. The live website displays the server-hosted observatory. The repository includes a separate framework demonstration for development; clone the repository and serve its static files locally:
 
 ~~~bash
 git clone https://github.com/Niqsaturn/RefraxG.git
@@ -52,9 +52,9 @@ cd RefraxG
 python -m http.server 8000 --bind 127.0.0.1
 ~~~
 
-Open http://127.0.0.1:8000/ in your browser.
+Open http://127.0.0.1:8000/framework.html in your browser.
 
-**Local development:** the website currently points at the hosted API in the API constant at the top of app.js. To use a local gateway, change that constant to http://127.0.0.1:8875/v1 and configure the gateway origin as http://127.0.0.1:8000. The map renderer and basemap require network access to their asset providers. Browser geolocation requires a secure context and permission (localhost is normally treated as trustworthy).
+**Local development:** the framework demonstration points at the hosted API in the API constant at the top of app.js. To use a local gateway, change that constant to http://127.0.0.1:8875/v1 and configure the gateway origin as http://127.0.0.1:8000. The map renderer and basemap require network access to their asset providers. Browser geolocation requires a secure context and permission (localhost is normally treated as trustworthy).
 
 ### 2. Navigate the observatory
 
@@ -121,7 +121,8 @@ flowchart LR
 
 | File | Responsibility |
 | --- | --- |
-| index.html | Observatory layout and map controls |
+| index.html | Live observatory website shell |
+| framework.html | Standalone framework demonstration and map controls |
 | style.css | Responsive presentation |
 | app.js | Map rendering, reference geometry, location and snapshot interaction |
 | api.py | Fixed-route gateway, validation, cache and location calculations |
@@ -258,7 +259,7 @@ HFCC records describe reference sites and schedules, not confirmed active transm
 - Set the exact frontend CORS origin, enforce request and concurrency budgets at the reverse proxy, and review security and provider terms before public deployment. CORS is not authentication.
 - Do not commit credentials, private sensor records, access tokens or user locations. Review source licenses and provider attribution before redistributing data.
 
-GitHub Pages serves static frontend assets only; deploy the Python gateway on a separate server and configure app.js with its HTTPS API address.
+GitHub Pages serves the website shell. The hosted observatory interface runs on a separate HTTPS server. For your own framework deployment, serve framework.html and configure app.js to use your compatible data gateway. Do not expose an administrative or private evidence-store API.
 
 ## Development and testing
 
