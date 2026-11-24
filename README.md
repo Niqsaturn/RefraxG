@@ -20,6 +20,10 @@ Explore the world from a global view down to individual city blocks, inspect mod
 
 > **Scientific scope:** Refrax G visualizes reference catalogs, published model products, and explicit simulations. It is not a global live RF receiver, a spectrum surveillance system, or a measurement of actual transmissions.
 
+### Repository scope
+
+This repository provides the Refrax G development framework, core visualization components, data API and local agent integration. It is **not a one-to-one downloadable copy of the hosted Refrax G observatory**. The website is a deployed application; its available features, datasets, configuration and integrations may differ from this repository. Use this framework as a foundation for building, customizing and extending your own observatory.
+
 ## Features
 
 | Feature | What it does |
